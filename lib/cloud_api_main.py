@@ -960,6 +960,13 @@ def get_user(username):
     return res_d
 
 
+def get_tags():
+    db_con = tdata.DB_CON
+    with db_con.cursor() as db_cur:
+        db_cur.execute("SELECT tag FROM tagwords ;")
+        tags = db_cur.fetchall()
+    tags = map(lambda a: a[0], tags)
+    return tags
 
 def get_tags_node(nodeid):
     db_con = tdata.DB_CON
@@ -1649,15 +1656,15 @@ def unauthorized():
 def api_root():
     return 'Kypo api\npožádejte o vytvoření uživatelského účtu'
 
-@app.route('/nodes', methods=['GET'])
+@app.route('/api/v1.0/nodes', methods=['GET'])
 @auth.login_required
 def api_nodes():
     status = "success"
     answ = {"data": {}}
 
     try:
-        nodes = get_nodes_db_and_internal()
-        answ["data"] = nodes
+        data = get_nodes_db_and_internal()
+        answ["data"] = data
     except BaseException as e:
         status = "error"
         answ["message"] = repr(e)
@@ -1667,14 +1674,33 @@ def api_nodes():
 
     return make_response(jsonify(answ))
 
-@app.route('/nodes/<int:nodeid>', methods=['GET'])
+@app.route('/api/v1.0/tags', methods=['GET'])
+@auth.login_required
+def api_tags():
+    status = "success"
+    answ = {"data": {}}
+
+    try:
+        data = get_tags()
+        answ["data"] = data
+    except BaseException as e:
+        status = "error"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = tdata.extended_error_log
+
+    answ["status"] = status
+
+    return make_response(jsonify(answ))
+
+
+@app.route('/api/v1.0/nodes/<int:nodeid>', methods=['GET'])
 @auth.login_required
 def api_node(nodeid):
     status = "success"
     answ = {"data": {}}
     try:
-        node = get_node_db_and_internal(nodeid)
-        answ["data"] = node
+        data = get_node_db_and_internal(nodeid)
+        answ["data"] = data
     except PrivilegeException as e:
         status = "failure"
         debug_log_print(e)
