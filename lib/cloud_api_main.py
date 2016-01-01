@@ -29,6 +29,7 @@ import binascii
 import logging
 
 from cloud_api_settings import *
+from cloud_api_nebulaconstants import *
 
 logging.basicConfig(filename=LOGGING_PATH,level=LOGLEVEL)
 
@@ -123,6 +124,8 @@ class InfoPoller(threading.Thread):
 
     def run(self):
         tdata.DB_CON = open_db2()
+        tdata.isadmin = True
+
         with tdata.DB_CON:
             global NODES_INFO
             global NETS_INFO
@@ -194,7 +197,8 @@ class InfoPoller(threading.Thread):
                 k,v = recursive_element_list(vm)
                 id = v['ID']
                 vms[id] = v
-        except RuntimeError:
+        except RuntimeError as e:
+            debug_log_print(e)
             return {}
         return vms
 
@@ -232,7 +236,8 @@ class InfoPoller(threading.Thread):
                     v['AR_POOL'] = ars_d
 
                 vnets[id] =v
-        except RuntimeError:
+        except RuntimeError as e:
+            debug_log_print(e)
             return {}
         return vnets
 
@@ -298,13 +303,13 @@ class MacAddress(object):
     def from_delimited(cls,macstr, delim=":"):
         parts = macstr.split(delim)
         if len(parts) != 6:
-            raise BadMacAddrError
+            raise BadMacAddrException
         try:
             for p in parts:
                 if not 0 <= int(p, base=16) <= 255:
-                    raise BadMacAddrError
+                    raise BadMacAddrException
         except:
-            raise BadMacAddrError
+            raise BadMacAddrException
         return MacAddress(macstr.replace(delim,""))
 
     @classmethod
@@ -313,129 +318,23 @@ class MacAddress(object):
         return MacAddress(plainstr)
 
 
-
-
-ADDRESS_RANGE='AR=[TYPE="ETHER", MAC="{0}", SIZE="{1}"]'
-
-
-NICLINE='NIC=[MODEL=virtio, NETWORK_ID=$netid#NUMBER#, NETWORK_UNAME=$netowner]'
-
-
-
-VM_STATE=["INIT", "PENDING", "HOLD", "ACTIVE", "STOPPED", "SUSPENDED", "DONE", "FAILED", "POWEROFF", "UNDEPLOYED"]
-SHORT_VM_STATES={
-            "INIT"      : "init",
-            "PENDING"   : "pend",
-            "HOLD"      : "hold",
-            "ACTIVE"    : "actv",
-            "STOPPED"   : "stop",
-            "SUSPENDED" : "susp",
-            "DONE"      : "done",
-            "FAILED"    : "fail",
-            "POWEROFF"  : "poff",
-            "UNDEPLOYED": "unde"
-        }
-
-VMSTATE2NUM = dict(map(lambda a: (a, VM_STATE.index(a)), VM_STATE))
-NUM2VMSTATE = dict(map(lambda a: (VM_STATE.index(a), a), VM_STATE))
-LCM_STATE=["LCM_INIT","PROLOG","BOOT","RUNNING","MIGRATE","SAVE_STOP","SAVE_SUSPEND",
-           "SAVE_MIGRATE","PROLOG_MIGRATE","PROLOG_RESUME","EPILOG_STOP","EPILOG","SHUTDOWN",
-           "CANCEL","FAILURE","CLEANUP_RESUBMIT","UNKNOWN","HOTPLUG","SHUTDOWN_POWEROFF",
-           "BOOT_UNKNOWN","BOOT_POWEROFF","BOOT_SUSPENDED","BOOT_STOPPED","CLEANUP_DELETE",
-           "HOTPLUG_SNAPSHOT","HOTPLUG_NIC","HOTPLUG_SAVEAS","HOTPLUG_SAVEAS_POWEROFF",
-           "HOTPLUG_SAVEAS_SUSPENDED","SHUTDOWN_UNDEPLOY","EPILOG_UNDEPLOY","PROLOG_UNDEPLOY",
-           "BOOT_UNDEPLOY","HOTPLUG_PROLOG_POWEROFF","HOTPLUG_EPILOG_POWEROFF","BOOT_MIGRATE",
-           "BOOT_FAILURE","BOOT_MIGRATE_FAILURE","PROLOG_MIGRATE_FAILURE","PROLOG_FAILURE",
-           "EPILOG_FAILURE","EPILOG_STOP_FAILURE","EPILOG_UNDEPLOY_FAILURE",
-           "PROLOG_MIGRATE_POWEROFF","PROLOG_MIGRATE_POWEROFF_FAILURE","PROLOG_MIGRATE_SUSPEND",
-           "PROLOG_MIGRATE_SUSPEND_FAILURE","BOOT_UNDEPLOY_FAILURE","BOOT_STOPPED_FAILURE",
-           "PROLOG_RESUME_FAILURE","PROLOG_UNDEPLOY_FAILURE","DISK_SNAPSHOT_POWEROFF",
-           "DISK_SNAPSHOT_REVERT_POWEROFF","DISK_SNAPSHOT_DELETE_POWEROFF",
-           "DISK_SNAPSHOT_SUSPENDED","DISK_SNAPSHOT_REVERT_SUSPENDED","DISK_SNAPSHOT_DELETE_SUSPENDED",
-           "DISK_SNAPSHOT","DISK_SNAPSHOT_REVERT","DISK_SNAPSHOT_DELETE"]
-SHORT_LCM_STATES={
-            "PROLOG"            : "prol",
-            "BOOT"              : "boot",
-            "RUNNING"           : "runn",
-            "MIGRATE"           : "migr",
-            "SAVE_STOP"         : "save",
-            "SAVE_SUSPEND"      : "save",
-            "SAVE_MIGRATE"      : "save",
-            "PROLOG_MIGRATE"    : "migr",
-            "PROLOG_RESUME"     : "prol",
-            "EPILOG_STOP"       : "epil",
-            "EPILOG"            : "epil",
-            "SHUTDOWN"          : "shut",
-            "CANCEL"            : "shut",
-            "FAILURE"           : "fail",
-            "CLEANUP_RESUBMIT"  : "clea",
-            "UNKNOWN"           : "unkn",
-            "HOTPLUG"           : "hotp",
-            "SHUTDOWN_POWEROFF" : "shut",
-            "BOOT_UNKNOWN"      : "boot",
-            "BOOT_POWEROFF"     : "boot",
-            "BOOT_SUSPENDED"    : "boot",
-            "BOOT_STOPPED"      : "boot",
-            "CLEANUP_DELETE"    : "clea",
-            "HOTPLUG_SNAPSHOT"  : "snap",
-            "HOTPLUG_NIC"       : "hotp",
-            "HOTPLUG_SAVEAS"           : "hotp",
-            "HOTPLUG_SAVEAS_POWEROFF"  : "hotp",
-            "HOTPLUG_SAVEAS_SUSPENDED" : "hotp",
-            "SHUTDOWN_UNDEPLOY" : "shut",
-            "EPILOG_UNDEPLOY"   : "epil",
-            "PROLOG_UNDEPLOY"   : "prol",
-            "BOOT_UNDEPLOY"     : "boot",
-            "HOTPLUG_PROLOG_POWEROFF"   : "hotp",
-            "HOTPLUG_EPILOG_POWEROFF"   : "hotp",
-            "BOOT_MIGRATE"              : "boot",
-            "BOOT_FAILURE"              : "fail",
-            "BOOT_MIGRATE_FAILURE"      : "fail",
-            "PROLOG_MIGRATE_FAILURE"    : "fail",
-            "PROLOG_FAILURE"            : "fail",
-            "EPILOG_FAILURE"            : "fail",
-            "EPILOG_STOP_FAILURE"       : "fail",
-            "EPILOG_UNDEPLOY_FAILURE"   : "fail",
-            "PROLOG_MIGRATE_POWEROFF"   : "migr",
-            "PROLOG_MIGRATE_POWEROFF_FAILURE"   : "fail",
-            "PROLOG_MIGRATE_SUSPEND"            : "migr",
-            "PROLOG_MIGRATE_SUSPEND_FAILURE"    : "fail",
-            "BOOT_UNDEPLOY_FAILURE"     : "fail",
-            "BOOT_STOPPED_FAILURE"      : "fail",
-            "PROLOG_RESUME_FAILURE"     : "fail",
-            "PROLOG_UNDEPLOY_FAILURE"   : "fail",
-            "DISK_SNAPSHOT_POWEROFF"        : "snap",
-            "DISK_SNAPSHOT_REVERT_POWEROFF" : "snap",
-            "DISK_SNAPSHOT_DELETE_POWEROFF" : "snap",
-            "DISK_SNAPSHOT_SUSPENDED"       : "snap",
-            "DISK_SNAPSHOT_REVERT_SUSPENDED": "snap",
-            "DISK_SNAPSHOT_DELETE_SUSPENDED": "snap",
-            "DISK_SNAPSHOT"        : "snap",
-            "DISK_SNAPSHOT_REVERT" : "snap",
-            "DISK_SNAPSHOT_DELETE" : "snap"
-        }
-
-LCMSTATE2NUM = dict(map(lambda a: (a, LCM_STATE.index(a)), LCM_STATE))
-NUM2LCMSTATE = dict(map(lambda a: (LCM_STATE.index(a), a), LCM_STATE))
-
-
 class KypoError(Exception):
     def __init__(self, arg=""):
-        self.msg = arg
+        self.message = arg
 
-class DuplicateNameError(KypoError):
+class DuplicateNameException(KypoError):
     pass
 
-class NoSuchObjectError(KypoError):
+class NoSuchObjectException(KypoError):
     pass
 
-class BadMacAddrError(KypoError):
+class BadMacAddrException(KypoError):
     pass
 
-class PrivilegeError(KypoError):
+class PrivilegeException(KypoError):
     pass
 
-class WrongStateForActionError(KypoError):
+class WrongStateForActionException(KypoError):
     pass
 
 
@@ -591,13 +490,13 @@ def check_user_privilege_node(nodeid):
     tags = get_tags_node(nodeid)
     usertag = "owner:{0]".format(tdata.username)
     if usertag not in tags:
-        raise PrivilegeError("you're not owner of this node")
+        raise PrivilegeException("you're not owner of this node")
 
 def check_user_privilege_net(netid):
     tags = get_tags_net(netid)
     usertag = "owner:{0]".format(tdata.username)
     if usertag not in tags:
-        raise PrivilegeError("you're not owner of this net")
+        raise PrivilegeException("you're not owner of this net")
 
 
 def execute_cmd(cmd):
@@ -640,8 +539,8 @@ def open_db2():
         db_con = psycopg2.connect(database=DATABASE, user=USER)
         db_con.autocommit = True
     except psycopg2.DatabaseError as e:
-        debug_log_print(str(e))
-        raise KypoError(str(e))
+        debug_log_print(repr(e))
+        raise
 
     return db_con
 
@@ -668,36 +567,13 @@ def get_network_db(netid):
         db_cur.execute("SELECT * from nebula_networks WHERE id = %s ;", (netid,))
         net_dict = db_cur.fetchone()
     if not net_dict:
-        raise NoSuchObjectError
+        raise NoSuchObjectException
 
     return net_dict
 
-def get_nodes_db_and_nebula(tags=None, nodeids=None):
-    db_con = tdata.DB_CON
-    with db_con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as db_cur:
-        if tags:
-            tag_placeholder = ", ".join([ "%s" for t in tags])
+def get_nodes_db_and_internal(tags=None, nodeids=None):
 
-            querystart = "SELECT n.* from nodes n, nodes_taggings nt, tagwords t WHERE t.tag in ("
-
-            queryend = ") AND nt.tag_id = t.id AND n.id = nt.node_id GROUP BY n.id HAVING COUNT( n.id ) = %s ;"
-
-            db_cur.execute(querystart + tag_placeholder + queryend, tags + [len(tags)])
-
-        else:
-            db_cur.execute("SELECT * from nodes ;")
-        nodesquery = db_cur.fetchall()
-
-        if nodeids:
-            nodes = []
-            for node in nodesquery:
-                if node["id"] in nodeids:
-                    nodes.append(node)
-        else:
-            nodes = nodesquery
-    nodes_d = {}
-    for node in nodes:
-        nodes_d[node["id"]] = node
+    nodes_d = get_nodes_db(tags, nodeids)
 
     nebulanodes = list_nodes_nebula()
 
@@ -715,28 +591,46 @@ def get_nodes_db_and_nebula(tags=None, nodeids=None):
     return nodes_d
 
 def get_nodes_db(tags=None, nodeids=None):
+
     db_con = tdata.DB_CON
     with db_con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as db_cur:
         if tags:
+            tags = set(tags)
+            if not tdata.isadmin:
+                tags.add(tdata.ownertag)
             tag_placeholder = ", ".join([ "%s" for t in tags])
 
             querystart = "SELECT n.* from nodes n, node_taggings nt, tagwords t WHERE t.tag in ("
 
             queryend = ") AND nt.tag_id = t.id AND n.id = nt.node_id GROUP BY n.id HAVING COUNT( n.id ) = %s ;"
 
-            db_cur.execute(querystart + tag_placeholder + queryend, tags + [len(tags)])
-
+            db_cur.execute(querystart + tag_placeholder + queryend, list(tags) + [len(tags)])
         else:
-            db_cur.execute("SELECT * from nodes ;")
-        nodesquery = db_cur.fetchall()
+            if nodeids:
+                if not tdata.isadmin:
+                    nodeids_placeholder = ", ".join([ "%s" for _ in nodeids])
 
-        if nodeids:
-            nodes = []
-            for node in nodesquery:
-                if node["id"] in nodeids:
-                    nodes.append(node)
-        else:
-            nodes = nodesquery
+                    querystart = "SELECT n.* from nodes n, node_taggings nt, tagwords t WHERE  n.id in ("
+
+                    queryend = ") AND t.tag=%s AND nt.tag_id = t.id AND n.id = nt.node_id ;"
+                    db_cur.execute(querystart + nodeids_placeholder + queryend, nodeids+tdata.ownertag)
+                else:
+                    nodeids_placeholder = ", ".join([ "%s" for _ in nodeids])
+
+                    querystart = "SELECT n.* from nodes n WHERE  n.id in ("
+
+                    queryend = ") ;"
+                    db_cur.execute(querystart + nodeids_placeholder + queryend, nodeids)
+            else:
+                if not tdata.isadmin:
+                    query = "SELECT n.* from nodes n, node_taggings nt, tagwords t WHERE t.tag=%s AND nt.tag_id = t.id AND n.id = nt.node_id ;"
+                    db_cur.execute(query, (tdata.ownertag,))
+
+                else:
+                    db_cur.execute("SELECT * from nodes ;")
+
+        nodes = db_cur.fetchall()
+
     nodes_d = {}
     for node in nodes:
         nodes_d[node["id"]] = node
@@ -773,15 +667,34 @@ def get_nebulanetworks_db(tags=None, netids=None):
 
 def get_node_db(node_id):
     db_con = tdata.DB_CON
+
+    if not tdata.isadmin:
+        tags = get_tags_node(node_id)
+        if tdata.ownertag not in tags:
+            raise PrivilegeException
+
     with db_con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as db_cur:
         db_cur.execute("SELECT * from nodes WHERE id = %s ;", (node_id,))
         node_d = db_cur.fetchone()
 
     if not node_d:
-        raise NoSuchObjectError("Node with id: %d not found" % (node_id))
+        raise NoSuchObjectException("Node with id: %d not found" % (node_id))
 
     return node_d
 
+def get_node_db_and_internal(nodeid):
+    node = get_node_db(nodeid)
+
+    if node["platform"] == "nebula":
+        internalvalue = node["internal_id"]
+        try:
+            node["internal_info"] = info_node_nebula(internalvalue)
+        except NoSuchObjectException:
+            node["internal_info"] = None
+    else:
+        # TODO OpenStack
+        pass
+    return node
 
 
 def get_templates_db(user=None):
@@ -821,7 +734,7 @@ def get_interface_db(intfid):
         db_cur.execute("SELECT * from nebula_interfaces WHERE id=%s ;", (intfid,))
         res_d = db_cur.fetchone()
     if not res_d:
-        raise NoSuchObjectError("no interface with such id")
+        raise NoSuchObjectException("no interface with such id")
     return res_d
 
 
@@ -840,7 +753,7 @@ def get_nodetemplate_db(templid=None, templname=None):
             templ_d = None
 
     if not templ_d:
-        raise NoSuchObjectError("Template with id: %d not found" % (templid))
+        raise NoSuchObjectException("Template with id: %d not found" % (templid))
 
 
     templ_d["defaultvalues"] = json.loads(templ_d["defaultvalues"])
@@ -859,7 +772,7 @@ def add_node_db(node_d):
             nodeid = db_cur.fetchone()[0]
         except psycopg2.IntegrityError:
             debug_log("Such node name (%s) already exists in DB." % (node_d["name"],))
-            raise DuplicateNameError("Such node name (%s) already exists in DB." % (node_d["name"],))
+            raise DuplicateNameException("Such node name (%s) already exists in DB." % (node_d["name"],))
 
     return nodeid
 
@@ -923,14 +836,9 @@ def add_network_db(net_d, type="pt2pt", size=2, shaping="", startmac=None):
         #     db_cur.execute("INSERT into nebula_networks (nebulaid,size,used,vid,type,shaping,reservedsince) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id;" ,net_tuple)
         netid = db_cur.fetchone()[0]
 
-    ownertag = "owner:{0}".format(tdata.username)
 
-    try:
-        create_tag(ownertag)
-    except DuplicateNameError:
-        pass
 
-    add_tag_network(ownertag,netid)
+    add_tag_network(tdata.ownertag,netid)
 
     return netid
 
@@ -946,9 +854,9 @@ def add_nodetemplate_db(templstring,name,defaultvalues=None,default=False,user=N
     with db_con.cursor() as db_cur:
         try:
             db_cur.execute("INSERT into templates (name,template,defaultvalues,defaultuse,userid,platform) VALUES (%s, %s, %s, %s, %s, %s) ;" ,(name,templstring,defval_str,default,user,platform))
-        except psycopg2.IntegrityError ,e:
+        except psycopg2.IntegrityError  as e:
             debug_log_print_ext("template with name %s already exists" % (name,), e)
-            raise DuplicateNameError("template with name %s already exists" % (name,))
+            raise DuplicateNameException("template with name %s already exists" % (name,))
 
 
 
@@ -958,7 +866,7 @@ def create_tag(tagname):
         try:
             db_cur.execute("INSERT into tagwords (tag) VALUES (%s) ;" ,(tagname,))
         except psycopg2.IntegrityError:
-            raise DuplicateNameError("tag with name {0} already exists".format(tagname))
+            raise DuplicateNameException("tag with name {0} already exists".format(tagname))
 
 
 def add_tag_node(tags, node):
@@ -973,10 +881,10 @@ def add_tag_node(tags, node):
             except psycopg2.IntegrityError, e:
                 if "violates foreign key constraint" in e:
                     debug_log_print("such node id doesn't exist")
-                    raise NoSuchObjectError("such node id doesn't exist")
+                    raise NoSuchObjectException("such node id doesn't exist")
                 elif 'null value in column "tag_id" violates not-null constraint' in e:
                     debug_log_print("such tag doesn't exist")
-                    raise DuplicateNameError("such tag doesn't exist")
+                    raise DuplicateNameException("such tag doesn't exist")
                 else:
                     debug_log_print("add node integrity error: %s" %(e,))
                     raise KypoError("add node integrity error: %s" %(e,))
@@ -993,10 +901,10 @@ def remove_tag_node(tags, node):
             except psycopg2.IntegrityError, e:
                 if "violates foreign key constraint" in e:
                     debug_log_print("such node id doesn't exist")
-                    raise NoSuchObjectError("such node id doesn't exist")
+                    raise NoSuchObjectException("such node id doesn't exist")
                 elif 'null value in column "tag_id" violates not-null constraint' in e:
                     debug_log_print("such tag doesn't exist")
-                    raise DuplicateNameError("such tag doesn't exist")
+                    raise DuplicateNameException("such tag doesn't exist")
                 else:
                     debug_log_print("add node integrity error: %s" %(e,))
                     raise KypoError("add node integrity error: %s" %(e,))
@@ -1016,11 +924,11 @@ def add_tag_network(tags, net):
             except psycopg2.IntegrityError, e:
                 if "violates foreign key constraint" in e:
                     debug_log_print("such net id doesn't exist")
-                    raise NoSuchObjectError("such net id doesn't exist")
+                    raise NoSuchObjectException("such net id doesn't exist")
 
                 elif 'null value in column "tag_id" violates not-null constraint' in e:
                     debug_log_print("such tag doesn't exist")
-                    raise DuplicateNameError("such tag doesn't exist")
+                    raise DuplicateNameException("such tag doesn't exist")
                 else:
                     debug_log_print("add net integrity error: %s" %(e,))
                     raise KypoError("add net integrity error: %s" %(e,))
@@ -1304,7 +1212,7 @@ def nebula_attach_node_to_net(info_d, netid, waitforcompletion=False):
         try:
             db_cur.execute("INSERT into nebula_interfaces (node_id, mac_addr, ip_addr, net_id, shaping) VALUES (%s, %s, %s, %s, %s) RETURNING id;", intf_tuple)
             dbid = db_cur.fetchone()[0]
-        except psycopg2.IntegrityError, e:
+        except psycopg2.IntegrityError as e:
             debug_log("nebula_attach_node_to_net - INSERT" + str(intf_tuple))
             raise KypoError(e + str(intf_tuple))
 
@@ -1460,7 +1368,7 @@ def create_node(templatename, **kwargs):
 
 
 def create_node_nebula(templateid,nics=None,tags=None, **kwargs):
-    ownertag = "owner:{0}".format(tdata.username)
+    ownertag = tdata.ownertag
     if not tags:
         tags = [ownertag]
     if tags is not None and isinstance(tags,basestring):
@@ -1521,7 +1429,7 @@ def create_node_nebula(templateid,nics=None,tags=None, **kwargs):
                 nebulainfo = info_node_nebula(internalid)
                 if nebulainfo:
                     break
-            except NoSuchObjectError:
+            except NoSuchObjectException:
                 callbacks_in_queue.put(cb)
                 change_condition.wait()
     # opennebula porad nezacala schedulovat
@@ -1580,7 +1488,7 @@ def info_node_nebula(nebulaid):
     nodes_info_lock.release()
 
     if not node:
-        raise NoSuchObjectError("node with nebula id %d doesn't exist" % nebulaid)
+        raise NoSuchObjectException("node with nebula id %d doesn't exist" % nebulaid)
     return node
 
 
@@ -1677,7 +1585,7 @@ def check_state_nebula(nebulaid, vmstate=None, lcmstate=None, tries=1):
             return True
 
         if tries == 1:
-            raise WrongStateForActionError("attempted action isn't possible due to node being in wrong state")
+            raise WrongStateForActionException("attempted action isn't possible due to node being in wrong state")
         tries = tries - 1
         time.sleep(4.2)
     return True
@@ -1723,7 +1631,9 @@ def verify_password(username, password):
             return False
 
         tdata.username = username
-        tdata.isadmin = res_d
+        tdata.isadmin = res_d["isadmin"]
+        tdata.extended_error_log = ""
+        tdata.ownertag = "owner:{0}".format(username)
 
         derivedkey = hashlib.pbkdf2_hmac('sha256', password, res_d["salt"], 100000)
         hexalified = binascii.hexlify(derivedkey)
@@ -1735,9 +1645,6 @@ def unauthorized():
     return make_response(jsonify({'error': 'Unauthorized access'}), 403)
 
 
-
-
-
 @app.route('/')
 def api_root():
     return 'Kypo api\npožádejte o vytvoření uživatelského účtu'
@@ -1745,20 +1652,48 @@ def api_root():
 @app.route('/nodes', methods=['GET'])
 @auth.login_required
 def api_nodes():
-    data = get_nodes_db()
+    status = "success"
+    answ = {"data": {}}
 
-    debug_log_print("to serialize", data)
-    # for node_d in data:
-    #     node_d["lastchange"] = str(node_d["lastchange"])
+    try:
+        nodes = get_nodes_db_and_internal()
+        answ["data"] = nodes
+    except BaseException as e:
+        status = "error"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = tdata.extended_error_log
 
-    return make_response(jsonify({"results":data}))
+    answ["status"] = status
 
-@app.route('/nodes/<int:nodeid>')
+    return make_response(jsonify(answ))
+
+@app.route('/nodes/<int:nodeid>', methods=['GET'])
 @auth.login_required
-def api_article(nodeid):
-    debug_log_print("api_article request:")
-    debug_log_print(info_node_nebula(nodeid))
-    return json.dumps(info_node_nebula(nodeid))
+def api_node(nodeid):
+    status = "success"
+    answ = {"data": {}}
+    try:
+        node = get_node_db_and_internal(nodeid)
+        answ["data"] = node
+    except PrivilegeException as e:
+        status = "failure"
+        debug_log_print(e)
+        answ["message"] = repr(e)
+        answ["data"]["description"] = "you are neither owner nor admin"
+    except NoSuchObjectException as e:
+        status = "failure"
+        debug_log_print(e)
+        answ["message"] = repr(e)
+        answ["data"]["description"] = "no such node id exists"
+    except BaseException as e:
+        status = "error"
+        debug_log_print(e)
+        answ["message"] = repr(e)
+        answ["data"]["description"] = tdata.extended_error_log
+
+    answ["status"] = status
+
+    return make_response(jsonify(answ))
 
 
 if __name__ == '__main__':
@@ -1786,11 +1721,20 @@ if __name__ == '__main__':
 
 
         else:
+            # add_user("tester", "tester", isadmin=True)
+            res_d = get_user("tester")
+            if not res_d:
+                raise PrivilegeException("first create user")
+
+            tdata.username = res_d["name"]
+            tdata.isadmin = res_d["isadmin"]
+            tdata.extended_error_log = ""
+            tdata.ownertag = "owner:{0}".format(res_d["name"])
+
 
             tdata.username = "tester"
             tdata.extended_error_log = ""
 
-            # add_user("tester", "tester", isadmin=True)
 
             nodetmpl = '''
     CPU=$cpu
@@ -1844,6 +1788,7 @@ if __name__ == '__main__':
             #
             # db_con.close()
             debug_log_print("main:", get_nodes_db())
+            debug_print("more:", get_nodes_db_and_internal())
 
             # debug_log_print(connect_nodes_nebula(1,2,None,None))
 
