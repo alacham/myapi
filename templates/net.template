@@ -1,0 +1,8 @@
+NAME="kypo vxlan-$vlanid"
+DESCRIPTION="kypo network vxlan $vlanid"
+BRIDGE="br-vx$vlanid"
+PHYDEV="br-inet"
+SECURITY_GROUPS="0"
+VLAN="YES"
+VLAN_ID="$vlanid"
+

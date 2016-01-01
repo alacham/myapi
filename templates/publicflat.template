@@ -1,0 +1,7 @@
+NAME="$lanname"
+DESCRIPTION="kypo public network $lanid"
+BRIDGE="br-internet"
+PHYDEV="br-internet"
+SECURITY_GROUPS="0"
+VLAN="NO"
+
