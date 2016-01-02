@@ -231,18 +231,16 @@ class InfoPoller(threading.Thread):
                 k,v = recursive_element_list(vnet)
                 nid = v['ID']
 
-                ars_d = {} #address ranges
+                # ars_d = {} #address ranges
                 if v['AR_POOL'] is not None:
                     if isinstance(v['AR_POOL']['AR'],list):
-                        ars = v['AR_POOL']['AR']
-                        for ar in ars:
-                            ars_d[ar['AR_ID']] = ar
+                        v['AR_POOL'] = v['AR_POOL']['AR']
+
                     else:
-                        ars_d[v['AR_POOL']['AR']['AR_ID']] = v['AR_POOL']['AR']
+                        v['AR_POOL'] = [ v['AR_POOL']['AR'] ]
 
-
-                    for k2,v2 in ars_d.items():
-                        if "ALLOCATED" in v2 and v2["ALLOCATED"] is not None:
+                    for v2 in v['AR_POOL']:
+                        if v2.get("ALLOCATED"): #is not None nor empty dict
                             allocated = map(int, v2["ALLOCATED"].split())
                             alloc_d = {}
 
@@ -251,8 +249,11 @@ class InfoPoller(threading.Thread):
                                 # v https://github.com/burgosz/opennebula-sunstone-shib/blob/master/ruby/onedb/local/4.5.80_to_4.7.80.rb
                                 alloc_d[allocated[i*2]] = allocated[i*2+1] & 0x00000000FFFFFFFF
                             v2["ALLOCATED"] = alloc_d
+                        else:
+                            v2["ALLOCATED"] = {}
 
-                    v['AR_POOL'] = ars_d
+                else:
+                    v['AR_POOL'] = []
 
                 vnets[nid] =v
         except RuntimeError as e:
@@ -698,7 +699,7 @@ def get_networks_db_and_internal(tags=None, typeselect=None):
     out_d = {}
     for k,v in nets_d.iteritems():
         internalid = v["nebulaid"]
-        v["internalinfo"] = nebulanets_d.get(internalid, None)
+        v["internal_info"] = nebulanets_d.get(internalid, None)
 
         if typeselect and v["type"] == typeselect:
             out_d[k] = v
@@ -1141,13 +1142,36 @@ def remove_disconnect_interface(intfid):
 
     node_d = get_node_db(intf_d["node_id"])
 
-    check_state_nebula(intf_d["node_id"],lcmstate="RUNNING",tries=2)
+    check_state_nebula(node_d["internal_id"],lcmstate="RUNNING",tries=2)
 
-    out, stderr = execute_cmd("onevm  nic-detach  {0} --network {1}".format(node_d["internal_id"], net_d["nebulaid"]))
+    nebulanode = info_node_nebula(node_d["internal_id"])
+    nics = nebulanode["TEMPLATE"]["NIC"]
+    found = False
+    for nic_d in nics:
+        if nic_d['NETWORK_ID'] == net_d["nebulaid"] and nic_d['MAC'] == intf_d["mac_addr"]:
+            nic_id = nic_d['NIC_ID']
+            found = True
+            break
+
+    if not found:
+        debug_log_print_ext("inside nebula is no maching interface", nics)
+        raise KypoError("error detaching net interface, inside nebula is no maching interface")
+
+
+    out, stderr = execute_cmd("onevm  nic-detach  {0} {1}".format(node_d["internal_id"], nic_id))
     if out:
-        debug_log_print("dettaching nic in nebula unsuccessful", "onevm  nic-detach  {0} --network {1}".format(node_d["internal_id"], net_d["nebulaid"]), out)
+        debug_log_print_ext("dettaching nic in nebula unsuccessful", "onevm  nic-detach  {0} {1}".format(node_d["internal_id"], net_d["nebulaid"]), out)
         raise KypoError("dettaching nic in nebula unsuccessful")
+
+    if net_d["type"] == "pt2pt":
+        try:
+            remove_addrarr_nebulanet(intf_d["net_id"], intf_d["mac_addr"])
+        except Exception as e:
+            # neni vazne , vzhledem k tomu, ze nic-detach nijak nervalo
+            debug_log_print_ext("error removeing addrarr from nebulanet" ,repr(e))
+
     delete_nebulainterface_db(intfid)
+
 
 
 def create_vxlan_nebulanet(mac, size=None, addars=None, nettype="pt2pt"):
@@ -1615,6 +1639,48 @@ def add_addrarr_nebulanet(netid, mac, size):
     increase_net_size_db(netid, howmuch=size)
 
 
+def remove_addrarr_nebulanet(netid, startmac):
+
+    net_d = get_network_db_and_internal(netid)
+
+    arpool = net_d.get("internal_info", {}).get("AR_POOL")
+    if not arpool:
+        debug_log_print_ext("underlying nebulanetwork isn't available or has no Address Ranges; netid: {0}, startmac: {1}".format(netid,startmac))
+        raise NoSuchObjectException("underlying nebulanetwork isn't available or has no Address Ranges; netid: {0}, startmac: {1}".format(netid,startmac))
+
+    for addrrange in arpool:
+        ar_id = addrrange["AR_ID"]
+        mac = addrrange["MAC"]
+        size = addrrange["SIZE"]
+
+        if mac == startmac:
+            break
+    if mac != startmac:
+        debug_log_print_ext("there is no Address Range in netid: {0} with startmac: {1}".format(netid,startmac))
+        raise NoSuchObjectException("there is no Address Range in netid: {0} with startmac: {1}".format(netid,startmac))
+
+    for i in range(4):
+        out, stderr = execute_cmd("onevnet rmar {0} {1}".format(net_d["nebulaid"], ar_id))
+        if not out or "Address Range does not exist" in out:
+            break
+        time.sleep(2.5)
+
+    if out and "Address Range does not exist" not in out:
+        debug_log_print_ext("addr range removal unsuccessful", out)
+        raise KypoError(out)
+
+    decrease_net_size_db(netid, size)
+
+    return True
+
+
+
+
+
+    pass
+
+
+
 def list_nodes_nebula():
 
     nodes_info_lock.acquire()
@@ -1630,6 +1696,7 @@ def info_node_nebula(nebulaid):
     nodes_info_lock.release()
 
     if not node:
+        debug_log_print_ext("node with nebula id {0} doesn't exist".format(nebulaid))
         raise NoSuchObjectException("node with nebula id {0} doesn't exist".format(nebulaid))
     return node
 
@@ -1639,6 +1706,7 @@ def info_nebulanet(nebulaid):
     nets_info_lock.release()
 
     if not net:
+        debug_log_print_ext("net with net id {0} doesn't exist".format(nebulaid))
         raise NoSuchObjectException("net with net id {0} doesn't exist".format(nebulaid))
     return net
 
@@ -2096,6 +2164,29 @@ def api_nets_list():
 
     return make_response(jsonify(answ))
 
+@app.route('/api/v1.0/nets/<int:nodeid>', methods=['DELETE'])
+@auth.login_required
+def api_net_delete(nodeid):
+    status = "success"
+    answ = {"data": {}}
+    # debug_log_print(request.data)
+
+    try:
+        delete_node(nodeid)
+        answ["data"]["deleted"] = True
+    except KypoError as e:
+        status = "failure"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = tdata.extended_error_log
+    except Exception as e:
+        status = "error"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = tdata.extended_error_log
+
+    answ["status"] = status
+
+    return make_response(jsonify(answ))
+
 
 @app.route('/api/v1.0/nets/<int:netid>', methods=['GET'])
 @auth.login_required
@@ -2242,7 +2333,12 @@ CONTEXT=[DUMMY="dummy"]
             # debug_log_print(connect_nodes_nebula(1,2,None,None))
             # debug_log_print(connect_nodes_nebula(1,2,None,None))
 
-            debug_print(get_nodes_db_and_internal())
+            # debug_print(get_node_db_and_internal(2))
+            # debug_print(get_interfaces_db(nodeid=2))
+            #
+            # debug_print(get_node_db_and_internal(2))
+            #
+            debug_print(remove_disconnect_interface(2))
 
 
             # debug_log_print("Nodes DB:", get_nodes_db(tags=["LMN","user:jirka"]))
@@ -2300,4 +2396,4 @@ CONTEXT=[DUMMY="dummy"]
         # tdata.DB_CON.close()
         #pprint.pprint(list_templates_nebula())
 
-    time.sleep(5)
+    time.sleep(2)
