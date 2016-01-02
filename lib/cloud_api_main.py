@@ -1484,7 +1484,7 @@ def change_node_state(nodeid, whattodo, waitforit=True):
         pass
 
 
-def connect_nodes_nebula(n1, n2, mac1, mac2):
+def connect_nodes_nebula(n1, n2, mac1=None, mac2=None):
     if not mac1:
         mac1 = str(MacAddress.from_parts(macprefix=MAC_PREFIX_DEFAULT))
     if not mac2:
@@ -1530,7 +1530,7 @@ def connect_nodes_nebula(n1, n2, mac1, mac2):
         execute_cmd("onevnet delete {0}".format(net_d["nebulaid"]))
         raise
 
-    return { "network": netid , "interface1": intfid1 , "interface2": intfid2}
+    return { "id": netid , "interface_id1": intfid1 , "interface_id2": intfid2}
 
 
 def create_node(templatename, **kwargs):
@@ -2250,6 +2250,39 @@ def api_net_delete(netid):
     return make_response(jsonify(answ))
 
 
+@app.route('/api/v1.0/nets', methods=['POST'])
+@auth.login_required
+def api_net_create_link():
+    status = "success"
+    answ = {"data": {}}
+    # debug_log_print(request.data)
+
+    try:
+        debug_log_print_ext("attmpting to load from json", request.data)
+        reqdata = json.loads(request.data)
+
+        n1 = reqdata.pop("node_id1")
+        n2 = reqdata.pop("node_id2")
+
+        data = connect_nodes_nebula(n1, n2, **reqdata)
+
+        answ["data"]["deleted"] = data
+    except KypoError as e:
+        status = "failure"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = tdata.extended_error_log
+    except Exception as e:
+        status = "error"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = tdata.extended_error_log
+
+    answ["status"] = status
+
+    return make_response(jsonify(answ))
+
+
+
+
 @app.route('/api/v1.0/nets/<int:netid>', methods=['GET'])
 @auth.login_required
 def api_net_get(netid):
@@ -2261,11 +2294,38 @@ def api_net_get(netid):
     except PrivilegeException as e:
         status = "failure"
         answ["message"] = repr(e)
-        answ["data"]["description"] = "you are neither owner nor admin"
+        answ["data"]["description"] = tdata.extended_error_log + "you are neither owner nor admin"
     except NoSuchObjectException as e:
         status = "failure"
         answ["message"] = repr(e)
-        answ["data"]["description"] = "no such net id exists"
+        answ["data"]["description"] = tdata.extended_error_log + "no such net id exists"
+    except BaseException as e:
+        status = "error"
+        debug_log_print(e)
+        answ["message"] = repr(e)
+        answ["data"]["description"] = tdata.extended_error_log
+
+    answ["status"] = status
+
+    return make_response(jsonify(answ))
+
+@app.route('/api/v1.0/nets/<int:netid>/interfaces', methods=['GET'])
+@auth.login_required
+def api_net_interfaces_get(netid):
+    status = "success"
+    answ = {"data": {}}
+    try:
+        get_network_db(netid)
+        data = get_interfaces_db(netid=netid)
+        answ["data"]["interfaces"] = data
+    except PrivilegeException as e:
+        status = "failure"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = tdata.extended_error_log + "you are neither owner nor admin"
+    except NoSuchObjectException as e:
+        status = "failure"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = tdata.extended_error_log + "no such net id exists"
     except BaseException as e:
         status = "error"
         debug_log_print(e)
@@ -2292,11 +2352,11 @@ def api_node_interfaces_get(nodeid):
     except PrivilegeException as e:
         status = "failure"
         answ["message"] = repr(e)
-        answ["data"]["description"] = "you are neither owner nor admin"
+        answ["data"]["description"] = tdata.extended_error_log + "you are neither owner nor admin"
     except NoSuchObjectException as e:
         status = "failure"
         answ["message"] = repr(e)
-        answ["data"]["description"] = "no such node id exists"
+        answ["data"]["description"] = tdata.extended_error_log + "no such node id exists"
     except BaseException as e:
         status = "error"
         debug_log_print(e)
@@ -2308,6 +2368,59 @@ def api_node_interfaces_get(nodeid):
     return make_response(jsonify(answ))
 
 
+@app.route('/api/v1.0/interfaces/<int:intfid>', methods=['GET'])
+@auth.login_required
+def api_interface_get(intfid):
+    status = "success"
+    answ = {"data": {}}
+    try:
+        data = get_interface_db(intfid)
+        answ["data"]["interface"] = data
+    except PrivilegeException as e:
+        status = "failure"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = tdata.extended_error_log + "you are neither owner nor admin"
+    except NoSuchObjectException as e:
+        status = "failure"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = tdata.extended_error_log + "no such interface id exists"
+    except BaseException as e:
+        status = "error"
+        debug_log_print(e)
+        answ["message"] = repr(e)
+        answ["data"]["description"] = tdata.extended_error_log
+
+    answ["status"] = status
+
+    return make_response(jsonify(answ))
+
+@app.route('/api/v1.0/interfaces/<int:intfid>', methods=['DELETE'])
+@auth.login_required
+def api_interface_delete(intfid):
+    status = "success"
+    answ = {"data": {}}
+    try:
+        #TODO odstranit i addr range?
+        remove_disconnect_interface(intfid)
+
+        answ["data"]["deleted"] = True
+    except PrivilegeException as e:
+        status = "failure"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = tdata.extended_error_log + "you are neither owner nor admin"
+    except NoSuchObjectException as e:
+        status = "failure"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = tdata.extended_error_log + "no such interface id exists"
+    except BaseException as e:
+        status = "error"
+        debug_log_print(e)
+        answ["message"] = repr(e)
+        answ["data"]["description"] = tdata.extended_error_log
+
+    answ["status"] = status
+
+    return make_response(jsonify(answ))
 
 
 
