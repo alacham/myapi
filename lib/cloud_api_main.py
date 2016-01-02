@@ -1035,8 +1035,11 @@ def add_tag_network(tags, net):
 def add_user(username, password, isadmin=False, kypouser=None):
 
     saltstr = "".join(random.choice(SALTCHARS) for _ in range(SALTLEN))
-    derivedkey = hashlib.pbkdf2_hmac('sha256', password, saltstr, 100000)
-    hexalified = binascii.hexlify(derivedkey)
+    # derivedkey = hashlib.pbkdf2_hmac('sha256', password, saltstr, 100000)
+    # hexalified = binascii.hexlify(derivedkey)
+
+    hexalified = hashlib.sha512(password+saltstr).hexdigest()
+
 
     inserttuple = (username, hexalified, saltstr, isadmin, kypouser)
 
@@ -1811,8 +1814,9 @@ def verify_password(username, password):
         tdata.extended_error_log = ""
         tdata.ownertag = "owner:{0}".format(username)
 
-        derivedkey = hashlib.pbkdf2_hmac('sha256', password, res_d["salt"], 100000)
-        hexalified = binascii.hexlify(derivedkey)
+        # derivedkey = hashlib.pbkdf2_hmac('sha256', password, res_d["salt"], 100000)
+        # hexalified = binascii.hexlify(derivedkey)
+        hexalified = hashlib.sha512(password+res_d["salt"]).hexdigest()
 
     return res_d["password"] == hexalified
 
