@@ -8,7 +8,7 @@ import sys
 import os
 import psycopg2
 import psycopg2.extras
-psycopg2.extras.register_default_json(loads=lambda x: x)
+# psycopg2.extras.register_default_json(loads=lambda x: x)
 import time
 import subprocess
 import tempfile
@@ -1135,7 +1135,7 @@ def delete_nebulainterface_db(intfid):
         db_cur.execute("DELETE FROM nebula_interfaces WHERE id=%s ;" ,(intfid,))
     return True
 
-def remove_disconnect_interface(intfid):
+def remove_disconnect_interface(intfid, deleteaddrarr=False):
     intf_d = get_interface_db(intfid)
 
     net_d = get_network_db(intf_d["net_id"])
@@ -1163,7 +1163,7 @@ def remove_disconnect_interface(intfid):
         debug_log_print_ext("dettaching nic in nebula unsuccessful", "onevm  nic-detach  {0} {1}".format(node_d["internal_id"], net_d["nebulaid"]), out)
         raise KypoError("dettaching nic in nebula unsuccessful")
 
-    if net_d["type"] == "pt2pt":
+    if net_d["type"] == "pt2pt" and deleteaddrarr:
         try:
             remove_addrarr_nebulanet(intf_d["net_id"], intf_d["mac_addr"])
         except Exception as e:
@@ -1171,6 +1171,46 @@ def remove_disconnect_interface(intfid):
             debug_log_print_ext("error removeing addrarr from nebulanet" ,repr(e))
 
     delete_nebulainterface_db(intfid)
+    return True
+
+
+def remove_network(netid):
+
+    # also privilege check
+    net_d = get_network_db(netid)
+
+    attached_interfaces = get_interfaces_db(netid)
+
+    node_ids = map(lambda a: a["node_id"], attached_interfaces.itervalues())
+
+
+    node_nebulaids = map(lambda a: a["internal_id"], get_nodes_db(nodeids=node_ids).itervalues())
+
+    for nebulaid in node_nebulaids:
+        check_state_nebula(nebulaid, lcmstate="RUNNING", tries=1)
+
+    results = []
+    for intf in  attached_interfaces.itervalues():
+        try:
+            result = remove_disconnect_interface(intf["id"])
+        except Exception as e:
+            debug_log_print_ext(repr(e))
+            result = False
+        finally:
+            results.append(result)
+
+    if all(results): #everything successful
+        delete_net_db(netid)
+    else:
+        raise KypoError("removing network {0} was only partially successful".format(netid))
+
+    out, stderr = execute_cmd("onevnet delete {0}".format(net_d["nebulaid"]))
+    if out:
+        debug_log_print("network wasn't deleted from nebula", "orphan nebula net {0}".format(net_d["nebulaid"]))
+
+    return True
+
+
 
 
 
@@ -1480,7 +1520,7 @@ def connect_nodes_nebula(n1, n2, mac1, mac2):
     except BaseException as e:
         debug_log_print_ext(e)
         try:
-            remove_disconnect_interface(intfid1)
+            remove_disconnect_interface(intfid1, deleteaddrarr=False)
         except:
             pass
         try:
@@ -1810,6 +1850,7 @@ def check_state_nebula(nebulaid, vmstate=None, lcmstate=None, tries=1):
                 return True
 
             if tries == 1:
+                debug_log_print_ext("attempted action isn't possible due to node being in wrong state (current: {0} ; needed: {1}".format((realvmstate,reallcmstate),(vmstate,lcmstate)))
                 raise WrongStateForActionException("attempted action isn't possible due to node being in wrong state")
             tries = tries - 1
 
@@ -1896,6 +1937,26 @@ def unauthorized():
 @app.route('/')
 def api_root():
     return 'Kypo api\npožádejte o vytvoření uživatelského účtu'
+
+
+@app.route('/deletions', methods=['GET'])
+def api_deletions():
+    tdata.DB_CON = open_db2()
+    tdata.isadmin = True
+    everything = ""
+    vmdel = "onevm delete {0} \n"
+    vnetdel = "onevnet delete {0} \n"
+
+    try:
+        for i in get_nodes_db().itervalues():
+            everything += vmdel.format(i["internal_id"])
+
+        for i in get_networks_db().itervalues():
+            everything += vnetdel.format(i["nebulaid"])
+    except Exception as e:
+        debug_log_print("Error:", repr(e))
+
+    return everything
 
 @app.route('/api/v1.0/tags', methods=['GET'])
 @auth.login_required
@@ -1993,9 +2054,9 @@ def api_templates_list():
 def api_templates_add():
     status = "success"
     answ = {"data": {}}
-    debug_log_print(request.data)
 
     try:
+        debug_log_print_ext("attempting to add template from request:", request.data)
         reqdata = json.loads(request.data)
         templstring = reqdata.pop("template")
         name = reqdata.pop("name")
@@ -2009,6 +2070,7 @@ def api_templates_add():
     except Exception as e:
         status = "error"
         answ["message"] = repr(e)
+        answ["data"]["description"] = tdata.extended_error_log
 
     answ["status"] = status
 
@@ -2164,15 +2226,15 @@ def api_nets_list():
 
     return make_response(jsonify(answ))
 
-@app.route('/api/v1.0/nets/<int:nodeid>', methods=['DELETE'])
+@app.route('/api/v1.0/nets/<int:netid>', methods=['DELETE'])
 @auth.login_required
-def api_net_delete(nodeid):
+def api_net_delete(netid):
     status = "success"
     answ = {"data": {}}
     # debug_log_print(request.data)
 
     try:
-        delete_node(nodeid)
+        remove_network(netid)
         answ["data"]["deleted"] = True
     except KypoError as e:
         status = "failure"
@@ -2338,7 +2400,7 @@ CONTEXT=[DUMMY="dummy"]
             #
             # debug_print(get_node_db_and_internal(2))
             #
-            debug_print(remove_disconnect_interface(2))
+            debug_print(remove_network(2))
 
 
             # debug_log_print("Nodes DB:", get_nodes_db(tags=["LMN","user:jirka"]))
