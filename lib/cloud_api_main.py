@@ -1736,8 +1736,8 @@ def info_node_nebula(nebulaid):
     nodes_info_lock.release()
 
     if not node:
-        debug_log_print_ext("node with nebula id {0} doesn't exist".format(nebulaid))
-        raise NoSuchObjectException("node with nebula id {0} doesn't exist".format(nebulaid))
+        debug_log_print_ext("node with nebula id {0} doesn't exist in nebula".format(nebulaid))
+        raise NoSuchObjectException("node with nebula id {0} doesn't nebula".format(nebulaid))
     return node
 
 def info_nebulanet(nebulaid):
@@ -2132,19 +2132,18 @@ def api_node_get(nodeid):
     status = "success"
     answ = {"data": {}}
     try:
-        get_node_state(nodeid)
         data = get_node_db_and_internal(nodeid)
         answ["data"]["node"] = data
     except PrivilegeException as e:
         status = "failure"
         debug_log_print(e)
         answ["message"] = repr(e)
-        answ["data"]["description"] = "you are neither owner nor admin"
+        answ["data"]["description"] = tdata.extended_error_log + "you are neither owner nor admin"
     except NoSuchObjectException as e:
         status = "failure"
         debug_log_print(e)
         answ["message"] = repr(e)
-        answ["data"]["description"] = "no such node id exists"
+        answ["data"]["description"] = tdata.extended_error_log + "no such node id exists"
     except BaseException as e:
         status = "error"
         debug_log_print(e)
@@ -2154,6 +2153,75 @@ def api_node_get(nodeid):
     answ["status"] = status
 
     return make_response(jsonify(answ))
+
+@app.route('/api/v1.0/nodes/<int:nodeid>/status', methods=['GET'])
+@auth.login_required
+def api_node_get_status(nodeid):
+    status = "success"
+    answ = {"data": {}}
+    try:
+        data = get_node_state(nodeid)
+        answ["data"] = data
+    except PrivilegeException as e:
+        status = "failure"
+        debug_log_print(e)
+        answ["message"] = repr(e)
+        answ["data"]["description"] = tdata.extended_error_log +"; you are neither owner nor admin"
+    except NoSuchObjectException as e:
+        status = "failure"
+        debug_log_print(e)
+        answ["message"] = repr(e)
+        answ["data"]["description"] = tdata.extended_error_log +"; no such node id exists"
+    except BaseException as e:
+        status = "error"
+        debug_log_print(e)
+        answ["message"] = repr(e)
+        answ["data"]["description"] = tdata.extended_error_log
+
+    answ["status"] = status
+
+    return make_response(jsonify(answ))
+
+
+@app.route('/api/v1.0/nodes/<int:nodeid>/vncinfo', methods=['GET'])
+@auth.login_required
+def api_node_get_vncinfo(nodeid):
+    status = "success"
+    answ = {"data": {}}
+    try:
+        nodeinfo = get_node_db_and_internal(nodeid)
+        if nodeinfo["state"] == "UNKNOWN":
+            raise NoSuchObjectException("underlying nebula node probably doesn't exist ")
+        if get_node_state(nodeid, selector="lcm_state") != "RUNNING":
+            raise WrongStateForActionException("that node isn't running")
+        internal = nodeinfo["internal_info"]
+        info = { "host" : internal["HISTORY_RECORDS"]["HISTORY"]["HOSTNAME"],
+                 "port" : internal["TEMPLATE"]["GRAPHICS"]["PORT"],
+                 "password": internal["TEMPLATE"]["GRAPHICS"]["PASSWD"] }
+
+        answ["data"]["vncinfo"] = info
+    except PrivilegeException as e:
+        status = "failure"
+        debug_log_print(e)
+        answ["message"] = repr(e)
+        answ["data"]["description"] = tdata.extended_error_log +"; you are neither owner nor admin"
+    except NoSuchObjectException as e:
+        status = "failure"
+        debug_log_print(e)
+        answ["message"] = repr(e)
+        answ["data"]["description"] = tdata.extended_error_log +"; no such node id exists"
+    except BaseException as e:
+        status = "error"
+        debug_log_print(e)
+        answ["message"] = repr(e)
+        answ["data"]["description"] = tdata.extended_error_log
+
+    answ["status"] = status
+
+    return make_response(jsonify(answ))
+
+
+
 
 @app.route('/api/v1.0/nodes/<int:nodeid>', methods=['DELETE'])
 @auth.login_required
@@ -2261,8 +2329,8 @@ def api_net_create_link():
         debug_log_print_ext("attmpting to load from json", request.data)
         reqdata = json.loads(request.data)
 
-        n1 = reqdata.pop("node_id1")
-        n2 = reqdata.pop("node_id2")
+        n1 = reqdata.pop("node1")
+        n2 = reqdata.pop("node2")
 
         data = connect_nodes_nebula(n1, n2, **reqdata)
 
@@ -2444,7 +2512,7 @@ if __name__ == '__main__':
             callbackdispatcher.start()
             debug_log_print("started callback dispatcher ")
 
-            app.run(threaded=True)
+            app.run('0.0.0.0', threaded=True)
             # app.run()
 
 
@@ -2513,7 +2581,6 @@ CONTEXT=[DUMMY="dummy"]
             #
             # debug_print(get_node_db_and_internal(2))
             #
-            debug_print(remove_network(2))
 
 
             # debug_log_print("Nodes DB:", get_nodes_db(tags=["LMN","user:jirka"]))
