@@ -17,8 +17,6 @@ import re
 import random
 import string
 import json
-import xmlrpclib
-import multiprocessing
 import time
 import threading
 import pprint
@@ -31,20 +29,20 @@ import logging
 from cloud_api_settings import *
 from cloud_api_nebulaconstants import *
 
-logging.basicConfig(filename=LOGGING_PATH,level=LOGLEVEL)
+logging.basicConfig(filename=LOGGING_PATH, level=LOGLEVEL)
 
 from datetime import datetime, timedelta
 
 
-def totimestamp(dt, epoch=datetime(1970,1,1)):
+def totimestamp(dt, epoch=datetime(1970, 1, 1)):
     td = dt - epoch
     # return td.total_seconds()
-    return (td.microseconds + (td.seconds + td.days * 86400) * 10**6) / 10**6
+    return (td.microseconds + (td.seconds + td.days * 86400) * 10 ** 6) / 10 ** 6
 
 
 import Queue
 
-tdata = threading.local() # thread local data - mainly for username
+tdata = threading.local()  # thread local data - mainly for username
 tdata.extended_error_log = ""
 tdata.DB_CON = None
 
@@ -55,6 +53,7 @@ def modified_pformat(arg):
     else:
         return pprint.pformat(arg)
 
+
 def debug_log(*args):
     now = str(datetime.utcnow())
 
@@ -64,6 +63,7 @@ def debug_log(*args):
         topr = now + ":\n"
     topr += "\n".join(map(modified_pformat, args))
     logging.debug(topr)
+
 
 def debug_print(*args):
     now = str(datetime.utcnow())
@@ -76,6 +76,7 @@ def debug_print(*args):
     if DEBUG_PRINTS:
         print topr
 
+
 def debug_log_print(*args):
     now = str(datetime.utcnow())
 
@@ -87,6 +88,7 @@ def debug_log_print(*args):
     logging.debug(topr)
     if DEBUG_PRINTS:
         print topr
+
 
 def debug_log_print_ext(*args):
     now = str(datetime.utcnow())
@@ -102,12 +104,9 @@ def debug_log_print_ext(*args):
         print topr
 
 
-
-
 callback_send_queue = Queue.Queue()
 
 callbacks_in_queue = Queue.Queue()
-
 
 NODES_INFO = {}
 NETS_INFO = {}
@@ -121,97 +120,94 @@ nets_info_lock.acquire()
 
 
 class InfoPoller(threading.Thread):
-
     def run(self):
-        tdata.DB_CON = open_db2()
-        tdata.isadmin = True
 
-        with tdata.DB_CON:
-            global NODES_INFO
-            global NETS_INFO
+        global NODES_INFO
+        global NETS_INFO
 
-            NODES_INFO = self.list_nodes_nebula()
-            # debug_log_print(NODES_INFO)
+        NODES_INFO = self.list_nodes_nebula()
+        # debug_log_print(NODES_INFO)
+        nodes_info_lock.release()
+        NETS_INFO = self.list_nebulanets_xml()
+        nets_info_lock.release()
+
+        time.sleep(2)
+
+        callbacks_to_check = []
+        resend_notify_signal = []
+
+        # main checking loop
+        while True:
+
+            # obtain new hooks from queue
+            while True:
+                try:
+                    callback = callbacks_in_queue.get_nowait()
+                    callbacks_to_check.append(callback)
+                except Queue.Empty:
+                    break
+
+            nodes = self.list_nodes_nebula()
+            nodes_info_lock.acquire()
+            NODES_INFO = nodes
             nodes_info_lock.release()
-            NETS_INFO = self.list_nebulanets_xml()
+
+            newcallbacks = []
+            for callback in callbacks_to_check:
+                should_notify = callback.check_changes(nebuladict=nodes)
+                if should_notify:
+                    if callback.notifycondition:
+                        resend_notify_signal.append(callback.notifycondition)
+
+                if not callback.finished:
+                    newcallbacks.append(callback)
+
+            callbacks_to_check = newcallbacks
+
+            time.sleep(1)
+
+            while True:
+                try:
+                    condition = resend_notify_signal.pop()
+                    with condition:
+                        condition.notifyAll()
+                except IndexError:
+                    break
+
+            nets = self.list_nebulanets_xml()
+            nets_info_lock.acquire()
+            NETS_INFO = nets
             nets_info_lock.release()
 
-            time.sleep(2)
+            time.sleep(1)
 
-            callbacks_to_check = []
-            resend_notify_signal = []
-
-            # main checking loop
-            while True:
-
-                # obtain new hooks from queue
-                while True:
-                    try:
-                        callback = callbacks_in_queue.get_nowait()
-                        callbacks_to_check.append(callback)
-                    except Queue.Empty:
-                        break
-
-                nodes = self.list_nodes_nebula()
-                nodes_info_lock.acquire()
-                NODES_INFO = nodes
-                nodes_info_lock.release()
-
-                newcallbacks = []
-                for callback in callbacks_to_check:
-                    should_notify = callback.check_changes(nebuladict=nodes)
-                    if should_notify:
-                        if callback.notifycondition:
-                            resend_notify_signal.append(callback.notifycondition)
-
-                    if not callback.finished:
-                        newcallbacks.append(callback)
-
-                callbacks_to_check = newcallbacks
-
-                time.sleep(2)
-
-                while True:
-                    try:
-                        condition = resend_notify_signal.pop()
-                        with condition:
-                            condition.notifyAll()
-                    except IndexError:
-                        break
-
-                nets = self.list_nebulanets_xml()
-                nets_info_lock.acquire()
-                NETS_INFO = nets
-                nets_info_lock.release()
-
-                time.sleep(2)
-
-    def list_nodes_nebula(self):
+    @staticmethod
+    def list_nodes_nebula():
         try:
-            out, stderr = execute_cmd_e("onevm list -x")
+            out, stderr = run_cmd_e("onevm list -x")
             tree = ET.fromstring(out)
 
-            #root = tree.getroot()
+            # root = tree.getroot()
             vms = {}
             for vm in tree:
-                k,val = recursive_element_list(vm)
+                k, val = recursive_element_list(vm)
                 nid = val['ID']
 
                 v = val.get("TEMPLATE")
                 if v:
                     if not v.get("NIC"):
                         v["NIC"] = []
-                    elif not isinstance(v['NIC'],list):
+                    elif not isinstance(v['NIC'], list):
                         v["NIC"] = [v["NIC"]]
 
                     if not v.get("DISK"):
                         v["DISK"] = []
-                    elif not isinstance(v["DISK"],list):
+                    elif not isinstance(v["DISK"], list):
                         v["DISK"] = [v["DISK"]]
 
                     if not v.get('HISTORY_RECORDS'):
                         v['HISTORY_RECORDS'] = []
-                    elif not isinstance(v['HISTORY_RECORDS'],list):
+                    elif not isinstance(v['HISTORY_RECORDS'], list):
                         v['HISTORY_RECORDS'] = [v['HISTORY_RECORDS']]
 
                 vms[nid] = val
@@ -220,34 +216,36 @@ class InfoPoller(threading.Thread):
             return {}
         return vms
 
-    def list_nebulanets_xml(self):
+    @staticmethod
+    def list_nebulanets_xml():
         try:
-            out, stderr = execute_cmd_e("onevnet list -x")
+            out, stderr = run_cmd_e("onevnet list -x")
             tree = ET.fromstring(out)
 
-            #root = tree.getroot()
+            # root = tree.getroot()
             vnets = {}
             for vnet in tree:
-                k,v = recursive_element_list(vnet)
+                k, v = recursive_element_list(vnet)
                 nid = v['ID']
 
                 # ars_d = {} #address ranges
                 if v['AR_POOL'] is not None:
-                    if isinstance(v['AR_POOL']['AR'],list):
+                    if isinstance(v['AR_POOL']['AR'], list):
                         v['AR_POOL'] = v['AR_POOL']['AR']
 
                     else:
-                        v['AR_POOL'] = [ v['AR_POOL']['AR'] ]
+                        v['AR_POOL'] = [v['AR_POOL']['AR']]
 
                     for v2 in v['AR_POOL']:
-                        if v2.get("ALLOCATED"): #is not None nor empty dict
+                        if v2.get("ALLOCATED"):  # is not None nor empty dict
                             allocated = map(int, v2["ALLOCATED"].split())
                             alloc_d = {}
 
-                            for i in range(0,int(len(allocated)/2)): # TODO to int by melo byt zbytecne, ale kvuli nejakemu bugu neni
+                            for i in range(0, int(len(
+                                    allocated) / 2)):  # TODO to int by melo byt zbytecne, ale kvuli nejakemu bugu neni
                                 # viz binary_magic = 0x0000001000000000 | (vid & 0xFFFFFFFF)
                                 # v https://github.com/burgosz/opennebula-sunstone-shib/blob/master/ruby/onedb/local/4.5.80_to_4.7.80.rb
-                                alloc_d[allocated[i*2]] = allocated[i*2+1] & 0x00000000FFFFFFFF
+                                alloc_d[allocated[i * 2]] = allocated[i * 2 + 1] & 0x00000000FFFFFFFF
                             v2["ALLOCATED"] = alloc_d
                         else:
                             v2["ALLOCATED"] = {}
@@ -255,7 +253,7 @@ class InfoPoller(threading.Thread):
                 else:
                     v['AR_POOL'] = []
 
-                vnets[nid] =v
+                vnets[nid] = v
         except RuntimeError as e:
             debug_log_print(e)
             return {}
@@ -263,7 +261,6 @@ class InfoPoller(threading.Thread):
 
 
 class CallbackSender(threading.Thread):
-
     def run(self):
 
         while True:
@@ -279,9 +276,18 @@ class CallbackSender(threading.Thread):
 
 
 
-class MacAddress(object):
+class CallbackChecker(threading.Thread):
+    def run(self):
 
-    def __init__(self,macplainstr):
+        callbacks_to_check = []
+        resend_notify_signal = []
+
+        while True:
+            pass
+
+
+class MacAddress(object):
+    def __init__(self, macplainstr):
         self.nummeric = int(macplainstr, 16)
 
 
@@ -291,7 +297,7 @@ class MacAddress(object):
         maclen = len(plainstr)
         for i in range(maclen):
             outstr.append(plainstr[i])
-            if i % 2 == 1 and i != maclen-1:
+            if i % 2 == 1 and i != maclen - 1:
                 outstr.append(":")
         return "".join(outstr)
 
@@ -300,7 +306,7 @@ class MacAddress(object):
 
 
     @classmethod
-    def from_parts(cls, macprefix=None, macsuffix=None, checkuser=False, checkflat=False, delim=":"):
+    def from_parts(cls, macprefix=None, macsuffix=None, delim=":"):
         if macprefix:
             macprefix = macprefix.replace(delim, "")
         else:
@@ -313,16 +319,16 @@ class MacAddress(object):
         togen = 12 - (len(macprefix) + len(macsuffix))
         macmiddle = "".join(random.choice('0123456789abcdef') for _ in range(togen))
 
-        #TODO check for duplicates
+        # TODO check for duplicates
 
-        macplain = macprefix+macmiddle+macsuffix
+        macplain = macprefix + macmiddle + macsuffix
 
         macobj = MacAddress(macplain)
 
         return macobj
 
     @classmethod
-    def from_delimited(cls,macstr, delim=":"):
+    def from_delimited(cls, macstr, delim=":"):
         parts = macstr.split(delim)
         if len(parts) != 6:
             raise BadMacAddrException
@@ -332,34 +338,53 @@ class MacAddress(object):
                     raise BadMacAddrException
         except:
             raise BadMacAddrException
-        return MacAddress(macstr.replace(delim,""))
+        return MacAddress(macstr.replace(delim, ""))
 
     @classmethod
     def from_nummeric(cls, num):
+        """
+
+        :param num: ninteger representing mac addr
+        :return: macaddress formatted as hexadecimal without ':'
+        """
         plainstr = '%012x' % num
         return MacAddress(plainstr)
 
 
-class KypoError(Exception):
+class GeneralAPIError(Exception):
     def __init__(self, arg=""):
         self.message = arg
 
-class DuplicateNameException(KypoError):
-    pass
 
-class NoSuchObjectException(KypoError):
-    pass
-
-class BadMacAddrException(KypoError):
-    pass
-
-class PrivilegeException(KypoError):
-    pass
-
-class WrongStateForActionException(KypoError):
+class ExternalCMDError(GeneralAPIError):
     pass
 
 
+class WrongRequestException(GeneralAPIError):
+    pass
+
+
+class DuplicateNameException(GeneralAPIError):
+    pass
+
+
+class NoSuchObjectException(GeneralAPIError):
+    pass
+
+
+class BadMacAddrException(GeneralAPIError):
+    pass
+
+
+class PrivilegeException(GeneralAPIError):
+    pass
+
+
+class WrongStateForActionException(GeneralAPIError):
+    pass
+
+
+# for waiting for event to give up after certain time
 def try_more_time(start_time, max_time):
     if max_time == 0:
         return True
@@ -370,11 +395,11 @@ def try_more_time(start_time, max_time):
         return True
 
 
-
 class NotifyTask(object):
     active_hooks = {}
 
-    def __init__(self, node_ids=None, change_selector=None, towhat=None, howmany=0, howlong=0, notifycondition=None, notifyaddr=None):
+    def __init__(self, node_ids=None, change_selector=None, towhat=None, howmany=0, howlong=0, notifycondition=None,
+                 notifyaddr=None):
         self.inittime = datetime.utcnow()
         self.finished = False
         self.towhat = towhat
@@ -400,17 +425,18 @@ class NotifyTask(object):
                     if allnodes[nid]["platform"] == "nebula" and allnodes[nid]["internal_id"]:
                         self.nebulaidstocheck.add(allnodes[nid]["internal_id"])
                         self.nebulaid_2_dbid[allnodes[nid]["internal_id"]] = nid
-                    else: # TODO OpenStack
+                    else:  # TODO OpenStack
                         pass
                 except Exception as e:
-                    debug_log_print_ext("NotifyTask: get internal id error: "+e)
+                    debug_log_print_ext("NotifyTask: get internal id error: " + e)
 
-        if (not self.nebulaidstocheck and not self.openstackidstocheck) or (not notifycondition and not notifyaddr) or not self.change_selector:
+        if (not self.nebulaidstocheck and not self.openstackidstocheck) or (
+                    not notifycondition and not notifyaddr) or not self.change_selector:
             self.finished = True
             debug_log("NotifyTask wouldn't check any nodes")
         else:
             while True:
-                self.taskid = random.randint(0, 2**32 -1)
+                self.taskid = random.randint(0, 2 ** 32 - 1)
                 if not self.taskid in self.active_hooks.keys():
                     self.active_hooks[self.taskid] = self
                     break
@@ -418,13 +444,13 @@ class NotifyTask(object):
                 self.previous_nebula = {}
 
 
-
     """
         checks if there are matching changes and possibly notifies about it
         :returns True to signal that it's to safe discard this check, False otherwise
     """
+
     def check_nebulanodes_changes(self, current_nebuladict):
-        self.changes_n = {}
+        changes_n = {}
         if self.finished:
             if self.notifycondition:
                 with self.notifycondition:
@@ -439,28 +465,28 @@ class NotifyTask(object):
 
             except KeyError:
                 debug_log("nebulaid %d or field selector %s not found" % (nebulaid, str(self.change_selector)))
-                self.changes_n[self.nebulaid_2_dbid[nebulaid]] = "nonexistent"
+                changes_n[self.nebulaid_2_dbid[nebulaid]] = "nonexistent"
                 idstoremove.add(nebulaid)
                 continue
 
-            prevnodestate = self.previous_nebula.get(nebulaid,{})
-            prevval = prevnodestate.get(self.change_selector,None)
+            prevnodestate = self.previous_nebula.get(nebulaid, {})
+            prevval = prevnodestate.get(self.change_selector, None)
 
             if prevval == curval:
                 continue
 
-            if curval == self.towhat or self.towhat == None:
-                self.changes_n[self.nebulaid_2_dbid[nebulaid]] = curval
+            if curval == self.towhat or self.towhat is None:
+                changes_n[self.nebulaid_2_dbid[nebulaid]] = curval
 
         self.previous_nebula = current_nebuladict
         self.nebulaidstocheck.difference_update(idstoremove)
 
-        if self.changes_n:
+        if changes_n:
             if self.notifycondition:
                 with self.notifycondition:
                     self.notifycondition.notifyAll()
             if self.notifyaddr:
-                datamsg = {"status": "ok", "type": "callback update", "changes": self.changes_n, "callbackid": self.taskid }
+                datamsg = {"status": "ok", "type": "callback update", "changes": changes_n, "callbackid": self.taskid}
                 callback_send_queue.put({"url": self.notifyaddr, "data": datamsg})
             self.counter += 1
             if self.howmany and self.counter >= self.howmany:
@@ -490,13 +516,10 @@ class NotifyTask(object):
         return self.check_nebulanodes_changes(nebuladict) or self.check_openstacknodes_changes(openstackdict)
 
 
-
-
-
 # def check_condition(test_callable, test_args, check_result_function, check_args, reaction, max_attempt_time, once=False):
 #
-#     def testfunction():
-#         starttime = time.time()
+# def testfunction():
+# starttime = time.time()
 #         end_condition = False
 #
 #         while end_condition == False and try_more_time(starttime, max_attempt_time):
@@ -507,57 +530,68 @@ class NotifyTask(object):
 #
 #     return testfunction
 
-def check_user_privilege_node(nodeid):
+def check_user_privilege_node(nodeid, username=None):
+    if not username:
+        if tdata.isadmin:
+            return True
+        username = tdata.username
     tags = get_tags_node(nodeid)
-    usertag = "owner:{0]".format(tdata.username)
+    usertag = "owner:{0]".format(username)
     if usertag not in tags:
-        raise PrivilegeException("you're not owner of this node")
+        raise PrivilegeException("{0} is not owner of this node".format(username))
 
-def check_user_privilege_net(netid):
+
+def check_user_privilege_net(netid, username=None):
+    if not username:
+        if tdata.isadmin:
+            return True
+        username = tdata.username
     tags = get_tags_net(netid)
-    usertag = "owner:{0]".format(tdata.username)
+    usertag = "owner:{0]".format(username)
     if usertag not in tags:
-        raise PrivilegeException("you're not owner of this net")
+        raise PrivilegeException("{0} is not owner of this net".format(username))
 
 
-def execute_cmd(cmd):
-    """Execute commnad with subprocess and return its stdout."""
+def run_cmd(cmd):
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+    stdout, stderr = process.communicate()
 
-    handler = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE)
-    stdout, stderr = handler.communicate()
-
-    # Check the exit code
-    if handler.returncode:
-        # raise RuntimeError("Error during '%s' execution. \nSTDERR: %s"     % (cmd, stdout))
-        return stderr+stdout, stderr
-    # Return stdout
+    if process.returncode != 0:
+        return stderr + stdout, stderr
     return stdout, stderr
 
-def execute_cmd_e(cmd):
-    """Execute commnad with subprocess and return its stdout."""
 
-    handler = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE)
-    stdout, stderr = handler.communicate()
+def run_cmd_e(cmd):
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+    stdout, stderr = process.communicate()
 
-    # Check the exit code
-    if handler.returncode:
-        raise RuntimeError("Error during '%s' execution. \nSTDERR: %s"     % (cmd, stdout))
-    # Return stdout
+    if process.returncode:
+        raise ExternalCMDError("Error executing '{0}': \nSTDOUT: {1}\nSTDERR: {2}".format(cmd, stdout, stderr))
     return stdout, stderr
+
+
+# vulnerability, replace with paramiko module
+def run_ssh_on_node(nodeid, cmd):
+    check_user_privilege_node(nodeid)
+
+    base_ssh_cmd = "ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -A root@{0}"
+
+    ip_addrs = filter(None, map(lambda a: a["ip_addr"], get_accessible_intf(nodeid)))
+
+
+def get_accessible_intf(nodeid):
+    db_con = tdata.DB_CON
+    with db_con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as db_cur:
+        db_cur.execute("SELECT intf.* from interfaces intf, networks net WHERE \
+          net.type='plain-flat' AND net.id=intf.net_id AND intf.node_id=%s ;", (nodeid,))
+        ip_addrs = db_cur.fetchone()
+    return ip_addrs
+
 
 def open_db2():
+    debug_log_print("trying to connect database: ", ( DATABASE, DBUSER))
     try:
-        # TODO predelat do os.environ
-        #DATABASE = os.environ["CLOUD_API_DB2"]
-        USER = os.environ["CLOUD_API_DB_USER"]
-    except KeyError:
-        raise RuntimeError("CLOUD_API_DB or CLOUD_API_DB_USER environment variable do not exist.")
-
-    debug_log_print("trying to connect database: ",( DATABASE, USER))
-    try:
-        db_con = psycopg2.connect(database=DATABASE, user=USER)
+        db_con = psycopg2.connect(database=DATABASE, user=DBUSER)
         db_con.autocommit = True
     except psycopg2.DatabaseError as e:
         debug_log_print(repr(e))
@@ -567,22 +601,18 @@ def open_db2():
 
 
 def get_network_db(netid):
+    check_user_privilege_net(netid)
     db_con = tdata.DB_CON
     with db_con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as db_cur:
-        db_cur.execute("SELECT * from nebula_networks WHERE id = %s ;", (netid,))
+        db_cur.execute("SELECT * from networks WHERE id = %s ;", (netid,))
         net_dict = db_cur.fetchone()
     if not net_dict:
         raise NoSuchObjectException("no such network id: {0}".format(netid))
 
-    if not tdata.isadmin:
-        tags = get_tags_net(netid)
-        if not tdata.ownertag in tags:
-            raise PrivilegeException("can't access network id: {0}".format(netid))
-
     return net_dict
 
-def get_network_db_and_internal(netid):
 
+def get_network_db_and_internal(netid):
     net_d = get_network_db(netid)
     internalid = net_d["nebulaid"]
     try:
@@ -593,9 +623,17 @@ def get_network_db_and_internal(netid):
     return net_d
 
 
+def get_network_db_for_output(netid):
+    net_d = get_network_db(netid)
+    internalid = net_d["nebulaid"]
+    internalinfo = info_nebulanet(internalid)
+    net_d["used_leases"] = internalinfo["USED_LEASES"]
+    return net_d
+
+
+
 
 def get_nodes_db_and_internal(tags=None, nodeids=None):
-
     nodes_d = get_nodes_db(tags, nodeids)
 
     nebulanodes = list_nodes_nebula()
@@ -606,25 +644,45 @@ def get_nodes_db_and_internal(tags=None, nodeids=None):
         if node["platform"] == "nebula":
             internalvalue = nebulanodes.get(internalid, None)
             node["internal_info"] = internalvalue
-            state = NUM2VMSTATE.get(nebulanodes.get(internalid,{}).get("STATE"),"UNKNOWN")
-            if state != node["state"]:
-                update_node_db(node["id"],node)
-                node["state"] = state
+            node["state"] = NUM2VMSTATE.get(nebulanodes.get(internalid, {}).get("STATE"), "UNKNOWN")
+
         else:
             #OpenStack
             pass
 
     return nodes_d
 
-def get_nodes_db(tags=None, nodeids=None):
+def get_nodes_db_for_output(tags=None, nodeids=None):
+    nodes_d = get_nodes_db(tags, nodeids)
 
+    nebulanodes = list_nodes_nebula()
+
+    for node in nodes_d.values():
+        internalid = node.get("internal_id")
+
+        if node["platform"] == "nebula":
+            internalvalue = nebulanodes.get(internalid, {})
+            node["state"] = NUM2VMSTATE.get(internalvalue.get("STATE"), "UNKNOWN")
+            node["vcpu"] = internalvalue.get("TEMPLATE").get("VCPU")
+            node["cpu"] = internalvalue.get("TEMPLATE").get("CPU")
+
+            node["memory"] = internalvalue.get("MEMORY")
+
+        else:
+            #OpenStack
+            pass
+
+    return nodes_d
+
+
+def get_nodes_db(tags=None, nodeids=None):
     db_con = tdata.DB_CON
     with db_con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as db_cur:
         if tags:
             tags = set(tags)
             if not tdata.isadmin:
                 tags.add(tdata.ownertag)
-            tag_placeholder = ", ".join([ "%s" for _ in tags])
+            tag_placeholder = ", ".join(["%s" for _ in tags])
 
             querystart = "SELECT n.* from nodes n, node_taggings nt, tagwords t WHERE t.tag in ("
 
@@ -634,14 +692,14 @@ def get_nodes_db(tags=None, nodeids=None):
         else:
             if nodeids:
                 if not tdata.isadmin:
-                    nodeids_placeholder = ", ".join([ "%s" for _ in nodeids])
+                    nodeids_placeholder = ", ".join(["%s" for _ in nodeids])
 
                     querystart = "SELECT n.* from nodes n, node_taggings nt, tagwords t WHERE  n.id in ("
 
                     queryend = ") AND t.tag=%s AND nt.tag_id = t.id AND n.id = nt.node_id ;"
-                    db_cur.execute(querystart + nodeids_placeholder + queryend, nodeids+tdata.ownertag)
+                    db_cur.execute(querystart + nodeids_placeholder + queryend, nodeids + tdata.ownertag)
                 else:
-                    nodeids_placeholder = ", ".join([ "%s" for _ in nodeids])
+                    nodeids_placeholder = ", ".join(["%s" for _ in nodeids])
 
                     querystart = "SELECT n.* from nodes n WHERE  n.id in ("
 
@@ -668,15 +726,15 @@ def get_networks_db(tags=None):
     db_con = tdata.DB_CON
     with db_con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as db_cur:
         if tdata.isadmin and not tags:
-            db_cur.execute("SELECT * from nebula_networks ;")
+            db_cur.execute("SELECT * from networks ;")
         else:
             tags = set(tags)
             if not tdata.isadmin:
                 tags.add(tdata.ownertag)
 
-            tag_placeholder = ", ".join([ "%s" for _ in tags])
+            tag_placeholder = ", ".join(["%s" for _ in tags])
 
-            querystart = "SELECT n.* from nebula_networks n, net_taggings nt, tagwords t WHERE t.tag in ("
+            querystart = "SELECT n.* from networks n, net_taggings nt, tagwords t WHERE t.tag in ("
 
             queryend = ") AND nt.tag_id = t.id AND n.id = nt.net_id GROUP BY n.id HAVING COUNT( n.id ) = %s ;"
 
@@ -690,14 +748,14 @@ def get_networks_db(tags=None):
 
     return nets_d
 
-def get_networks_db_and_internal(tags=None, typeselect=None):
 
+def get_networks_db_and_internal(tags=None, typeselect=None):
     nets_d = get_networks_db(tags)
 
     nebulanets_d = list_nebulanets_xml()
 
     out_d = {}
-    for k,v in nets_d.iteritems():
+    for k, v in nets_d.iteritems():
         internalid = v["nebulaid"]
         v["internal_info"] = nebulanets_d.get(internalid, None)
 
@@ -708,23 +766,40 @@ def get_networks_db_and_internal(tags=None, typeselect=None):
         return out_d
     return nets_d
 
+def get_networks_db_for_output(tags=None, typeselect=None):
+    nets_d = get_networks_db(tags)
+
+    nebulanets_d = list_nebulanets_xml()
+
+    out_d = {}
+    for k, v in nets_d.iteritems():
+        if typeselect and v["type"] == typeselect:
+            out_d[k] = v
+        elif typeselect and v["type"] != typeselect:
+            continue
+
+        internalid = v["nebulaid"]
+        internalinfo = nebulanets_d.get(internalid, {})
+        v["used_leases"] = internalinfo.get("USED_LEASES")
+
+    if typeselect:
+        return out_d
+    return nets_d
+
 
 
 def get_used_vxids_db():
     db_con = tdata.DB_CON
     with db_con.cursor() as db_cur:
-        db_cur.execute("SELECT vid from nebula_networks ;")
+        db_cur.execute("SELECT vid from networks ;")
         vxids = map(lambda a: a[0], db_cur.fetchall())
     return vxids
 
 
 def get_node_db(node_id):
-    db_con = tdata.DB_CON
+    check_user_privilege_node(node_id)
 
-    if not tdata.isadmin:
-        tags = get_tags_node(node_id)
-        if tdata.ownertag not in tags:
-            raise PrivilegeException("you cannot access this node")
+    db_con = tdata.DB_CON
 
     with db_con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as db_cur:
         db_cur.execute("SELECT * from nodes WHERE id = %s ;", (node_id,))
@@ -734,6 +809,7 @@ def get_node_db(node_id):
         raise NoSuchObjectException("Node with id: %d not found" % (node_id))
 
     return node_d
+
 
 def get_node_db_and_internal(nodeid):
     node = get_node_db(nodeid)
@@ -746,11 +822,31 @@ def get_node_db_and_internal(nodeid):
             node["internal_info"] = None
             state = "UNKNOWN"
         else:
-            state = NUM2VMSTATE.get(node["internal_info"].get("STATE"),"UNKNOWN")
+            state = NUM2VMSTATE.get(node["internal_info"].get("STATE"), "UNKNOWN")
+        node["state"] = state
+    else:
+        # TODO OpenStack
+        pass
+    return node
 
-        if state != node["state"]:
-            update_node_db(node["id"],node)
-            node["state"] = state
+
+def get_node_db_for_output(nodeid):
+    node = get_node_db(nodeid)
+
+    if node["platform"] == "nebula":
+        internalid = node["internal_id"]
+        try:
+            internalvalue = info_node_nebula(internalid)
+        except NoSuchObjectException:
+            internalvalue = {}
+            state = "UNKNOWN"
+        else:
+            state = NUM2VMSTATE.get(internalvalue.get("STATE"), "UNKNOWN")
+        node["state"] = state
+
+        node["vcpu"] = internalvalue.get("TEMPLATE").get("VCPU")
+        node["cpu"] = internalvalue.get("TEMPLATE").get("CPU")
+        node["memory"] = internalvalue.get("MEMORY")
     else:
         # TODO OpenStack
         pass
@@ -789,17 +885,18 @@ def get_templates_db(user=None, extractdefaults=True):
 
     return templates
 
-def get_interfaces_db(netid=None , nodeid=None):
+
+def get_interfaces_db(netid=None, nodeid=None):
     db_con = tdata.DB_CON
     with db_con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as db_cur:
         if not netid and not nodeid:
-            db_cur.execute("SELECT * from nebula_interfaces;")
+            db_cur.execute("SELECT * from interfaces;")
         elif netid and nodeid:
-            db_cur.execute("SELECT * from nebula_interfaces WHERE net_id=%s AND node_id=%s ;", (netid, nodeid))
+            db_cur.execute("SELECT * from interfaces WHERE net_id=%s AND node_id=%s ;", (netid, nodeid))
         elif netid:
-            db_cur.execute("SELECT * from nebula_interfaces WHERE net_id=%s ;", (netid,))
+            db_cur.execute("SELECT * from interfaces WHERE net_id=%s ;", (netid,))
         else:
-            db_cur.execute("SELECT * from nebula_interfaces WHERE node_id=%s ;", (nodeid,))
+            db_cur.execute("SELECT * from interfaces WHERE node_id=%s ;", (nodeid,))
 
         results = db_cur.fetchall()
     intfs_d = {}
@@ -808,19 +905,18 @@ def get_interfaces_db(netid=None , nodeid=None):
 
     return intfs_d
 
+
 def get_interface_db(intfid):
     db_con = tdata.DB_CON
     with db_con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as db_cur:
-        db_cur.execute("SELECT * from nebula_interfaces WHERE id=%s ;", (intfid,))
+        db_cur.execute("SELECT * from interfaces WHERE id=%s ;", (intfid,))
         res_d = db_cur.fetchone()
     if not res_d:
         raise NoSuchObjectException("no interface with such id")
     return res_d
 
 
-
-def get_nodetemplate_db(templid=None, templname=None,extractdefaults=True):
-
+def get_nodetemplate_db(templid=None, templname=None, extractdefaults=True):
     db_con = tdata.DB_CON
     with db_con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as db_cur:
         if templid:
@@ -832,7 +928,7 @@ def get_nodetemplate_db(templid=None, templname=None,extractdefaults=True):
         else:
             templ_d = None
 
-    if not tdata.isadmin and templ_d["userid"] and  templ_d["userid"] != tdata.userid:
+    if not tdata.isadmin and templ_d["userid"] and templ_d["userid"] != tdata.userid:
         raise PrivilegeException("this template id is privately owned by other player")
 
     if not templ_d:
@@ -844,13 +940,16 @@ def get_nodetemplate_db(templid=None, templname=None,extractdefaults=True):
     return templ_d
 
 
-
 def add_node_db(node_d):
     nodeid = None
     db_con = tdata.DB_CON
     with db_con.cursor() as db_cur:
-        node_tuple = (node_d.get("name",None), node_d.get("internal_id", None), node_d.get("state","ACTIVE"), datetime.utcnow(), node_d["platform"] )
-        db_cur.execute("INSERT into nodes (name, internal_id, state, lastchange, platform) VALUES ( %s, %s, %s, %s, %s) RETURNING id;", node_tuple)
+        node_tuple = (
+            node_d.get("name", None), node_d.get("internal_id", None), datetime.utcnow(),
+            node_d["platform"] )
+        db_cur.execute(
+            "INSERT into nodes (name, internal_id, lastchange, platform) VALUES ( %s, %s, %s, %s) RETURNING id;",
+            node_tuple)
         try:
             nodeid = db_cur.fetchone()[0]
         except psycopg2.IntegrityError:
@@ -859,20 +958,21 @@ def add_node_db(node_d):
 
     return nodeid
 
+
 def add_interface_db(info_d, netid):
-
-
     #info_d  je node_d ale s pridanymi parametry
     db_con = tdata.DB_CON
     with db_con.cursor() as db_cur:
         intf_tuple = (info_d["id"], info_d.get("mac_addr"), info_d.get("ip", None), netid, info_d.get("shaping", "") )
         isok = True
         try:
-            db_cur.execute("INSERT into nebula_interfaces (node_id, mac_addr, ip_addr, net_id, shaping) VALUES (%s, %s, %s, %s, %s) RETURNING id;", intf_tuple)
+            db_cur.execute(
+                "INSERT into interfaces (node_id, mac_addr, ip_addr, net_id, shaping) VALUES (%s, %s, %s, %s, %s) RETURNING id;",
+                intf_tuple)
             dbid = db_cur.fetchone()[0]
         except psycopg2.IntegrityError as e:
             debug_log("nebula_attach_node_to_net - INSERT" + str(intf_tuple))
-            raise KypoError(e + str(intf_tuple))
+            raise GeneralAPIError(e + str(intf_tuple))
     return dbid
 
 
@@ -885,74 +985,63 @@ def delete_node_db(nodeid):
 def delete_net_db(netid):
     db_con = tdata.DB_CON
     with db_con.cursor() as db_cur:
-        db_cur.execute("DELETE from nebula_networks WHERE id = %s ;", (netid,))
-
+        db_cur.execute("DELETE from networks WHERE id = %s ;", (netid,))
 
 
 def update_node_db(node_id, node_d):
-
     # check_user_privilege_node(node_id)
 
     db_con = tdata.DB_CON
     with db_con.cursor() as db_cur:
-        node_props = [node_d["name"], node_d["internal_id"], node_d["state"], datetime.utcnow(), node_d["platform"] ]
+        node_props = [node_d["name"], node_d["internal_id"], datetime.utcnow(), node_d["platform"]]
 
-        db_cur.execute("UPDATE nodes SET name=%s, internal_id=%s, state=%s, lastchange=%s, platform=%s WHERE id=%s ;", node_props+[node_id])
+        db_cur.execute("UPDATE nodes SET name=%s, internal_id=%s, lastchange=%s, platform=%s WHERE id=%s ;",
+                       node_props + [node_id])
 
-def increase_net_use_db(netid,howmuch=1):
+
+def increase_net_size_db(netid, howmuch=1):
     db_con = tdata.DB_CON
     with db_con.cursor() as db_cur:
-        db_cur.execute("UPDATE nebula_networks SET used=used+%s WHERE id=%s ;", (howmuch, netid))
+        db_cur.execute("UPDATE networks SET size=size+%s WHERE id=%s ;", (howmuch, netid))
 
-def decrease_net_use_db(netid,howmuch=1):
+
+def decrease_net_size_db(netid, howmuch=1):
     db_con = tdata.DB_CON
     with db_con.cursor() as db_cur:
-        db_cur.execute("UPDATE nebula_networks SET used=used-%s WHERE id=%s ;", (howmuch, netid))
+        db_cur.execute("UPDATE networks SET size=size-%s WHERE id=%s ;", (howmuch, netid))
 
-def increase_net_size_db(netid,howmuch=1):
+
+def add_network_db(net_d, type="pt2pt", size=2):
     db_con = tdata.DB_CON
-    with db_con.cursor() as db_cur:
-        db_cur.execute("UPDATE nebula_networks SET size=size+%s WHERE id=%s ;", (howmuch, netid))
-
-def decrease_net_size_db(netid,howmuch=1):
-    db_con = tdata.DB_CON
-    with db_con.cursor() as db_cur:
-        db_cur.execute("UPDATE nebula_networks SET size=size-%s WHERE id=%s ;", (howmuch, netid))
-
-
-def add_network_db(net_d, type="pt2pt", size=2, shaping="", startmac=None):
-    if isinstance(startmac, MacAddress):
-        startmac = str(startmac)
-
-    db_con = tdata.DB_CON
-    net_tuple = [net_d["nebulaid"], size, net_d.get("used",0), net_d["vxid"], type, shaping, datetime.utcnow(), startmac]
+    net_tuple = [net_d["nebulaid"], size, net_d["vxid"], type, datetime.utcnow()]
 
     with db_con.cursor() as db_cur:
         # if startmac:
         #     debug_log_print(startmac, startmac.nummeric, str(startmac))
         #     debug_log_print(net_tuple+[startmac])
-        db_cur.execute("INSERT into nebula_networks (nebulaid,size,used,vid,type,shaping,reservedsince,startmac) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;" ,net_tuple)
+        db_cur.execute(
+            "INSERT into networks (nebulaid,size,vid,type,reservedsince) VALUES (%s, %s, %s, %s, %s) RETURNING id;",
+            net_tuple)
         # else:
-        #     db_cur.execute("INSERT into nebula_networks (nebulaid,size,used,vid,type,shaping,reservedsince) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id;" ,net_tuple)
+        #     db_cur.execute("INSERT into networks (nebulaid,size,used,vid,type,shaping,reservedsince) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id;" ,net_tuple)
         netid = db_cur.fetchone()[0]
 
-
-
-    add_tag_network(tdata.ownertag,netid)
+    add_tag_network(tdata.ownertag, netid)
 
     return netid
 
 
-def add_nodetemplate_db(templstring,name,defaultvalues=None,defaultuse=False,userid=None,user=None, platform="nebula"):
-
+def add_nodetemplate_db(templstring, name, defaultvalues=None, defaultuse=False, userid=None, user=None,
+                        platform="nebula"):
     if user and isinstance(user, basestring):
         userid = get_user(username=user)["id"]
-
 
     db_con = tdata.DB_CON
     with db_con.cursor() as db_cur:
         try:
-            db_cur.execute("INSERT into templates (name,template,defaultvalues,defaultuse,userid,platform) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id;" ,(name,templstring,defaultvalues,defaultuse,userid,platform))
+            db_cur.execute(
+                "INSERT into templates (name,template,defaultvalues,defaultuse,userid,platform) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id;",
+                (name, templstring, defaultvalues, defaultuse, userid, platform))
             dbid = db_cur.fetchone()[0]
         except psycopg2.IntegrityError  as e:
             debug_log_print_ext("template with name %s already exists" % (name,), e)
@@ -964,7 +1053,7 @@ def create_tag(tagname):
     db_con = tdata.DB_CON
     with db_con.cursor() as db_cur:
         try:
-            db_cur.execute("INSERT into tagwords (tag) VALUES (%s) ;" ,(tagname,))
+            db_cur.execute("INSERT into tagwords (tag) VALUES (%s) ;", (tagname,))
         except psycopg2.IntegrityError:
             raise DuplicateNameException("tag with name {0} already exists".format(tagname))
 
@@ -977,7 +1066,9 @@ def add_tag_node(tags, node):
     with db_con.cursor() as db_cur:
         for tag in tags:
             try:
-                db_cur.execute("INSERT into node_taggings (node_id, tag_id) VALUES (%s, (SELECT id from tagwords WHERE tag =%s)) ;" ,(node, tag))
+                db_cur.execute(
+                    "INSERT into node_taggings (node_id, tag_id) VALUES (%s, (SELECT id from tagwords WHERE tag =%s)) ;",
+                    (node, tag))
             except psycopg2.IntegrityError as e:
                 if "violates foreign key constraint" in e:
                     debug_log_print("such node id doesn't exist")
@@ -986,8 +1077,9 @@ def add_tag_node(tags, node):
                     debug_log_print("such tag doesn't exist")
                     raise DuplicateNameException("such tag doesn't exist")
                 else:
-                    debug_log_print("add node integrity error: %s" %(e,))
-                    raise KypoError("add node integrity error: %s" %(e,))
+                    debug_log_print("add node integrity error: %s" % (e,))
+                    raise GeneralAPIError("add node integrity error: %s" % (e,))
+
 
 def remove_tag_node(tags, node):
     if isinstance(tags, basestring):
@@ -997,7 +1089,9 @@ def remove_tag_node(tags, node):
     with db_con.cursor() as db_cur:
         for tag in tags:
             try:
-                db_cur.execute("INSERT into node_taggings (node_id, tag_id) VALUES (%s, (SELECT id from tagwords WHERE tag =%s)) ;" ,(node, tag))
+                db_cur.execute(
+                    "INSERT into node_taggings (node_id, tag_id) VALUES (%s, (SELECT id from tagwords WHERE tag =%s)) ;",
+                    (node, tag))
             except psycopg2.IntegrityError as e:
                 if "violates foreign key constraint" in e:
                     debug_log_print("such node id doesn't exist")
@@ -1006,10 +1100,8 @@ def remove_tag_node(tags, node):
                     debug_log_print("such tag doesn't exist")
                     raise DuplicateNameException("such tag doesn't exist")
                 else:
-                    debug_log_print("add node integrity error: %s" %(e,))
-                    raise KypoError("add node integrity error: %s" %(e,))
-
-
+                    debug_log_print("add node integrity error: %s" % (e,))
+                    raise GeneralAPIError("add node integrity error: %s" % (e,))
 
 
 def add_tag_network(tags, net):
@@ -1020,7 +1112,9 @@ def add_tag_network(tags, net):
     with db_con.cursor() as db_cur:
         for tag in tags:
             try:
-                db_cur.execute("INSERT into net_taggings (net_id, tag_id) VALUES (%s, (SELECT id FROM tagwords WHERE tag=%s)) ;" ,(net,tag))
+                db_cur.execute(
+                    "INSERT into net_taggings (net_id, tag_id) VALUES (%s, (SELECT id FROM tagwords WHERE tag=%s)) ;",
+                    (net, tag))
             except psycopg2.IntegrityError as e:
                 if "violates foreign key constraint" in e:
                     debug_log_print("such net id doesn't exist")
@@ -1030,35 +1124,36 @@ def add_tag_network(tags, net):
                     debug_log_print("such tag doesn't exist")
                     raise DuplicateNameException("such tag doesn't exist")
                 else:
-                    debug_log_print("add net integrity error: %s" %(e,))
-                    raise KypoError("add net integrity error: %s" %(e,))
+                    debug_log_print("add net integrity error: %s" % (e,))
+                    raise GeneralAPIError("add net integrity error: %s" % (e,))
 
-def add_user(username, password, isadmin=False, kypouser=None):
 
+def add_user(username, password, isadmin=False, nebulauser=None):
     saltstr = "".join(random.choice(SALTCHARS) for _ in range(SALTLEN))
     # derivedkey = hashlib.pbkdf2_hmac('sha256', password, saltstr, 100000)
     # hexalified = binascii.hexlify(derivedkey)
 
-    hexalified = hashlib.sha512(password+saltstr).hexdigest()
+    hexalified = hashlib.sha512(password + saltstr).hexdigest()
 
-
-    inserttuple = (username, hexalified, saltstr, isadmin, kypouser)
+    inserttuple = (username, hexalified, saltstr, isadmin, nebulauser)
 
     db_con = tdata.DB_CON
     with db_con.cursor() as db_cur:
         try:
-            db_cur.execute("INSERT into users (name, password, salt, isadmin, kypouser) VALUES (%s, %s, %s, %s, %s) ;" , inserttuple)
+            db_cur.execute("INSERT into users (name, password, salt, isadmin, nebulauser) VALUES (%s, %s, %s, %s, %s) ;",
+                           inserttuple)
         except psycopg2.IntegrityError as e:
-            debug_log_print_ext("user couldn't be added, probably duplicate;\n %s" %(e,))
-            raise KypoError("user couldn't be added, probably duplicate")
+            debug_log_print_ext("user couldn't be added, probably duplicate;\n %s" % (e,))
+            raise GeneralAPIError("user couldn't be added, probably duplicate")
 
     create_tag("owner:{0}".format(username))
     return True
 
+
 def get_user(username):
     db_con = tdata.DB_CON
     with db_con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as db_cur:
-        db_cur.execute("SELECT id, name, password, salt, isadmin, kypouser FROM users WHERE name=%s ;" , [username])
+        db_cur.execute("SELECT * FROM users WHERE name=%s ;", [username])
         res_d = db_cur.fetchone()
     return res_d
 
@@ -1071,22 +1166,23 @@ def get_tags():
     tags = map(lambda a: a[0], tags)
     return tags
 
+
 def get_tags_node(nodeid):
     db_con = tdata.DB_CON
     with db_con.cursor() as db_cur:
-        db_cur.execute("SELECT tag FROM node_taggings, tagwords WHERE node_id=%s and tag_id=id ;" ,(nodeid,))
+        db_cur.execute("SELECT tag FROM node_taggings, tagwords WHERE node_id=%s and tag_id=id ;", (nodeid,))
         tags = db_cur.fetchall()
     tags = map(lambda a: a[0], tags)
     return tags
+
 
 def get_tags_net(netid):
     db_con = tdata.DB_CON
     with db_con.cursor() as db_cur:
-        db_cur.execute("SELECT tag FROM net_taggings, tagwords WHERE net_id=%s and tag_id=id ;" ,(netid,))
+        db_cur.execute("SELECT tag FROM net_taggings, tagwords WHERE net_id=%s and tag_id=id ;", (netid,))
         tags = db_cur.fetchall()
     tags = map(lambda a: a[0], tags)
     return tags
-
 
 
 def add_new_networks_db():
@@ -1094,7 +1190,7 @@ def add_new_networks_db():
         db_con = tdata.DB_CON
 
         with db_con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as db_cur:
-            db_cur.execute("SELECT * from nebula_networks;")
+            db_cur.execute("SELECT * from networks;")
             net_ds = db_cur.fetchall()
 
         nets = {}
@@ -1107,7 +1203,7 @@ def add_new_networks_db():
 
     debug_print("puvodni site")
     debug_print(dbnets)
-    nebulanets = list_vxlan_nebulanets()
+    nebulanets = list_nebulanets_xml()
     debug_print("nebula site")
     debug_print(nebulanets)
 
@@ -1115,7 +1211,6 @@ def add_new_networks_db():
         if k not in dbnets:
             n = nebulanets[k]
             n["id"] = n["ID"]
-            n["used"] = n["USED_LEASES"]
             if "VLAN" in n and n["VLAN"] == "1":
                 n["vxid"] = n["VLAN_ID"]
             else:
@@ -1132,8 +1227,9 @@ def add_new_networks_db():
 def delete_nebulainterface_db(intfid):
     db_con = tdata.DB_CON
     with db_con.cursor() as db_cur:
-        db_cur.execute("DELETE FROM nebula_interfaces WHERE id=%s ;" ,(intfid,))
+        db_cur.execute("DELETE FROM interfaces WHERE id=%s ;", (intfid,))
     return True
+
 
 def remove_disconnect_interface(intfid, deleteaddrarr=False):
     intf_d = get_interface_db(intfid)
@@ -1142,7 +1238,7 @@ def remove_disconnect_interface(intfid, deleteaddrarr=False):
 
     node_d = get_node_db(intf_d["node_id"])
 
-    check_state_nebula(node_d["internal_id"],lcmstate="RUNNING",tries=2)
+    check_state_nebula(node_d["internal_id"], lcmstate="RUNNING", tries=1)
 
     nebulanode = info_node_nebula(node_d["internal_id"])
     nics = nebulanode["TEMPLATE"]["NIC"]
@@ -1155,27 +1251,26 @@ def remove_disconnect_interface(intfid, deleteaddrarr=False):
 
     if not found:
         debug_log_print_ext("inside nebula is no maching interface", nics)
-        raise KypoError("error detaching net interface, inside nebula is no maching interface")
+        raise GeneralAPIError("error detaching net interface, inside nebula is no maching interface")
 
-
-    out, stderr = execute_cmd("onevm  nic-detach  {0} {1}".format(node_d["internal_id"], nic_id))
+    out, stderr = run_cmd("onevm  nic-detach  {0} {1}".format(node_d["internal_id"], nic_id))
     if out:
-        debug_log_print_ext("dettaching nic in nebula unsuccessful", "onevm  nic-detach  {0} {1}".format(node_d["internal_id"], net_d["nebulaid"]), out)
-        raise KypoError("dettaching nic in nebula unsuccessful")
+        debug_log_print_ext("dettaching nic in nebula unsuccessful",
+                            "onevm  nic-detach  {0} {1}".format(node_d["internal_id"], net_d["nebulaid"]), out)
+        raise GeneralAPIError("dettaching nic in nebula unsuccessful")
 
     if net_d["type"] == "pt2pt" and deleteaddrarr:
         try:
             remove_addrarr_nebulanet(intf_d["net_id"], intf_d["mac_addr"])
         except Exception as e:
             # neni vazne , vzhledem k tomu, ze nic-detach nijak nervalo
-            debug_log_print_ext("error removeing addrarr from nebulanet" ,repr(e))
+            debug_log_print_ext("error removeing addrarr from nebulanet", repr(e))
 
     delete_nebulainterface_db(intfid)
     return True
 
 
 def remove_network(netid):
-
     # also privilege check
     net_d = get_network_db(netid)
 
@@ -1183,14 +1278,13 @@ def remove_network(netid):
 
     node_ids = map(lambda a: a["node_id"], attached_interfaces.itervalues())
 
-
     node_nebulaids = map(lambda a: a["internal_id"], get_nodes_db(nodeids=node_ids).itervalues())
 
     for nebulaid in node_nebulaids:
         check_state_nebula(nebulaid, lcmstate="RUNNING", tries=1)
 
     results = []
-    for intf in  attached_interfaces.itervalues():
+    for intf in attached_interfaces.itervalues():
         try:
             result = remove_disconnect_interface(intf["id"])
         except Exception as e:
@@ -1199,48 +1293,43 @@ def remove_network(netid):
         finally:
             results.append(result)
 
-    if all(results): #everything successful
+    if all(results):  #everything successful
         delete_net_db(netid)
     else:
-        raise KypoError("removing network {0} was only partially successful".format(netid))
+        raise GeneralAPIError("removing network {0} wasn't successful,\
+         some attached interfaces couldn't be disconnected".format(netid))
 
-    out, stderr = execute_cmd("onevnet delete {0}".format(net_d["nebulaid"]))
+    out, stderr = run_cmd("onevnet delete {0}".format(net_d["nebulaid"]))
     if out:
         debug_log_print("network wasn't deleted from nebula", "orphan nebula net {0}".format(net_d["nebulaid"]))
 
     return True
 
 
-
-
-
-def create_vxlan_nebulanet(mac, size=None, addars=None, nettype="pt2pt"):
+def create_vxlan_nebulanet_ether(mac, size, addars=None, nettype="pt2pt"):
     temp_net_f = tempfile.NamedTemporaryFile(delete=False)
 
-    with open(TEMPLATE_PATH+VXLAN_TEMPLATE_FILE, "r") as nt:
+    with open(TEMPLATE_PATH + LINK_TEMPLATE_FILE, "r") as nt:
         nettemplate = string.Template(nt.read())
 
-    used_vlanids = list_vxlan_nebulanets().keys()
+    used_vlanids = nebulaid_to_vxlanid_mapping().values()
 
     vxid = 0
     while True:
         #TODO potentially infinite loop, all may be used up
-        vxid = random.randint(VXIDSTART,VXIDEND)
-        if str(vxid) not in used_vlanids:
+        vxid = random.randint(VXIDSTART, VXIDEND)
+        if vxid not in used_vlanids:
             break
-
-    if not size:
-        size = 1
 
     combinedsize = size
 
-    subst_dict = { "vlanid" : vxid }
+    subst_dict = {"vlanid": vxid}
     netstr = nettemplate.safe_substitute(subst_dict)
-    netstr += ADDRESS_RANGE.format(mac,size) + "\n"
+    netstr += ADDRESS_RANGE_ETHER.format(mac, size) + "\n"
 
     if addars:
         for mac, size in addars:
-            netstr += ADDRESS_RANGE.format(mac,size) + "\n"
+            netstr += ADDRESS_RANGE_ETHER.format(mac, size) + "\n"
             combinedsize += size
 
     temp_net_f.write(netstr)
@@ -1249,50 +1338,48 @@ def create_vxlan_nebulanet(mac, size=None, addars=None, nettype="pt2pt"):
     tname = temp_net_f.name
 
     debug_log_print("onevnet -c %s create %s" % (CLUSTER_NAME, tname))
-    out, stderr = execute_cmd("onevnet create -c {0}  {1}".format(CLUSTER_NAME, tname))
+    out, stderr = run_cmd("onevnet create -c {0}  {1}".format(CLUSTER_NAME, tname))
 
     if "ID:" == out[:3]:
         os.remove(tname)
     else:
         debug_log_print_ext(out)
-        raise KypoError(out)
+        raise GeneralAPIError(out)
 
     nebulanetid = int(out.split()[1])
 
-    net_d = {"nebulaid":nebulanetid, "vxid": vxid , "used": 0 }
+    net_d = {"nebulaid": nebulanetid, "vxid": vxid}
 
-    netid = add_network_db(net_d,nettype,size=combinedsize)
+    netid = add_network_db(net_d, nettype, size=combinedsize)
 
     debug_log_print("Nebula net %d added as network with db id %d " % (nebulanetid, netid))
 
     return netid
 
 
-
-
-def create_link(mac1,mac2):
+def create_link(mac1, mac2=None):
     temp_net_f = tempfile.NamedTemporaryFile(delete=False)
 
-    with open(TEMPLATE_PATH+VXLAN_TEMPLATE_FILE, "r") as nt:
+    with open(TEMPLATE_PATH + LINK_TEMPLATE_FILE, "r") as nt:
         nettemplate = string.Template(nt.read())
 
     #used_vlanids = map(lambda a: a.get('bridge').replace("onebr0-vlan",""),list_nebulanets())
-    used_vlanids = list_vxlan_nebulanets().keys()
+    used_vlanids = nebulaid_to_vxlanid_mapping().values()
 
     vxid = 0
     while True:
         #TODO potentially infinite loop, all may be used
-        vxid = random.randint(VXIDSTART,VXIDEND)
-        if str(vxid) not in used_vlanids:
+        vxid = random.randint(VXIDSTART, VXIDEND)
+        if vxid not in used_vlanids:
             break
 
-
-    subst_dict = { "vlanid" : vxid }
+    subst_dict = {"vlanid": vxid}
 
     netstr = nettemplate.safe_substitute(subst_dict)
 
-    netstr += ADDRESS_RANGE.format(mac1,1) + "\n"
-    netstr += ADDRESS_RANGE.format(mac2,2) + "\n"
+    netstr += ADDRESS_RANGE_ETHER.format(mac1, 1) + "\n"
+    if mac2:
+        netstr += ADDRESS_RANGE_ETHER.format(mac2, 2) + "\n"
 
     temp_net_f.write(netstr)
     temp_net_f.flush()
@@ -1300,108 +1387,136 @@ def create_link(mac1,mac2):
     tname = temp_net_f.name
 
     debug_log_print("onevnet -c %s create %s" % (CLUSTER_NAME, tname))
-    out, stderr = execute_cmd("onevnet create -c {0}  {1}".format(CLUSTER_NAME, tname))
+    out, stderr = run_cmd("onevnet create -c {0}  {1}".format(CLUSTER_NAME, tname))
 
     if "ID:" == out[:3]:
         os.remove(tname)
     else:
         debug_log(out)
-        raise KypoError(out)
+        raise GeneralAPIError(out)
 
     nebulanetid = int(out.split()[1])
 
-    net_d = {"nebulaid":nebulanetid, "vxid": vxid , "used": 0}
+    net_d = {"nebulaid": nebulanetid, "vxid": vxid}
 
-    netid = add_network_db(net_d,"pt2pt",size=2)
+    netsize = 1
+    if mac2:
+        netsize = 2
 
-    debug_log_print("Nebula net %d added as network with db id %d " % (nebulanetid, netid))
+    netid = add_network_db(net_d, "pt2pt", size=netsize)
 
+    debug_log_print('Nebula net {0} added as network with db id {1} '.format(nebulanetid, netid))
+    time.sleep(3)
     return netid
 
 
-def create_publicflat_nebulanet(size=254, startmac=None):
-    temp_net_f = tempfile.NamedTemporaryFile(delete=False)
+def create_flat_nebulanet(size=254, startmac=None, startip=None, vxlan=False, netaddr=None, netmask=None, gateway=None):
+    subst_dict = {}
 
-    with open(TEMPLATE_PATH+PUBLICLAN_TEMPLATE_FILE, "r") as nt:
-        nettemplate = string.Template(nt.read())
+    vxid = None
+    if vxlan:
+        type = "vxlan-flat"
 
-    nebulanets = list_nebulanets_xml()
-    while True:
-        lanid = random.randint(0,10000)
-        name = PUBLIC_NET_NAME_TEMPL.format(lanid)
+        used_vlanids = nebulaid_to_vxlanid_mapping().values()
 
-        nextiter = False
-        for v in nebulanets.itervalues():
-            if  name == v['NAME']:
-                nextiter = True
+        while True:
+            #TODO potentially infinite loop, all may be used
+            vxid = random.randint(VXIDSTART, VXIDEND)
+            if vxid not in used_vlanids:
                 break
-        if not nextiter:
+        subst_dict["vlanid"] = vxid
+        with open(TEMPLATE_PATH + VXLAN_FLAT_TEMPLATE_FILE, "r") as nt:
+            nettemplate = string.Template(nt.read())
+    else:
+        type = "plain-flat"
+        with open(TEMPLATE_PATH + PLAIN_FLAT_TEMPLATE_FILE, "r") as nt:
+            nettemplate = string.Template(nt.read())
+
+    #get name:
+    usednames = map(lambda a: a["NAME"], list_nebulanets_xml().itervalues())
+    while True:
+        namenum = random.randint(0, 1000)
+        netname = FLAT_NET_NAME_TEMPL.format(namenum)
+        if netname not in usednames:
+            subst_dict["lanname"] = netname
             break
 
-    subst_dict = { "lanid" : lanid , "lanname":name}
-
-    if not startmac:
-        startmac = MacAddress.from_parts(macprefix=FLAT_MAC_PREFIX, macsuffix="01")
-
     netstr = nettemplate.safe_substitute(subst_dict)
-    netstr += ADDRESS_RANGE.format(startmac,size) + "\n"
 
+    if startip and startmac:
+        netstr += ADDRESS_RANGE_IP4_ETHER.format(startip, startmac, size) + "\n"
+    elif startip:
+        netstr += ADDRESS_RANGE_IP4.format(startip, size)
+    else:
+        if not startmac:
+            startmac = MacAddress.from_parts(macprefix=FLAT_MAC_PREFIX, macsuffix="01")
+        netstr += ADDRESS_RANGE_ETHER.format(startmac, size)
+
+    if startip:
+        if netaddr:
+            netstr += 'NETWORK_ADDRESS = "{0}"\n'.format(netaddr)
+        if netmask:
+            netstr += 'NETWORK_MASK = "{0}"\n'.format(netmask)
+        if gateway:
+            netstr += 'GATEWAY = "{0}"\n'.format(gateway)
+
+    temp_net_f = tempfile.NamedTemporaryFile(delete=False)
     temp_net_f.write(netstr)
     temp_net_f.flush()
     temp_net_f.close()
     tname = temp_net_f.name
 
     debug_log_print("onevnet -c %s create %s" % (CLUSTER_NAME, tname))
-    out, stderr = execute_cmd("onevnet create -c {0}  {1}".format(CLUSTER_NAME, tname))
+    out, stderr = run_cmd("onevnet create -c {0}  {1}".format(CLUSTER_NAME, tname))
 
     if "ID:" == out[:3]:
         os.remove(tname)
     else:
-        debug_log(out)
-        raise KypoError(out)
+        debug_log_print_ext("ERROR onevnet creation:", tname, out)
+        raise GeneralAPIError(out)
 
     nebulanetid = int(out.split()[1])
 
-    net_d = {"id":nebulanetid, "vxid": None , "used": 0 }
+    net_d = {"nebulaid": nebulanetid, "vxid": vxid}
 
-    netid = add_network_db(net_d,"public",size=size,startmac=startmac)
+    netid = add_network_db(net_d, type, size=size)
 
     return netid
-
 
 
 def attach_node_to_net(node_d, netid):
     if node_d["platform"] == "nebula":
-        result=nebula_attach_node_to_net(node_d, netid)
+        result = nebula_attach_node_to_net(node_d, netid)
     else:
         ## TODO openstack
-        result=None
+        result = None
     return result
+
 
 #TODO FIX!
 def nebula_attach_node_to_net(node_d, netid):
-
     net_d = get_network_db(netid)
     if not net_d["nebulaid"]:
-        raise KypoError("network wasn't properly initialized")
+        raise GeneralAPIError("network wasn't properly initialized")
     nebulanetid = net_d["nebulaid"]
 
     # TODO - vyradit? used z db porusuje to x tou normu, muzu ziskat z interfaces - proc ne?
-    if net_d["size"] <= net_d["used"]:
-        raise KypoError("network size is not enough")
+    if net_d["size"] <= int(info_nebulanet(nebulanetid)["USED_LEASES"]):
+        raise GeneralAPIError("network size is not enough")
 
     intid = node_d["internal_id"]
-    out, stderr = execute_cmd("onevm nic-attach {0}  --network {1}".format(intid, nebulanetid))
+    out, stderr = run_cmd("onevm nic-attach {0}  --network {1}".format(intid, nebulanetid))
     debug_log_print("onevm nic-attach {0}  --network {1}".format(intid, nebulanetid))
 
-    if out: #pri uspechu se nepise nic, jinak ano
+    if out:  #pri uspechu se nepise nic, jinak ano
         debug_log(out)
-        raise KypoError(out)
-    increase_net_use_db(netid,howmuch=1)
+        raise GeneralAPIError(out)
+    # increase_net_use_db(netid,howmuch=1)
 
     change_condition = threading.Condition()
     with change_condition:
-        cb = NotifyTask(node_ids=[node_d["id"]], change_selector=None, towhat=None, howmany=1, notifycondition=change_condition)
+        cb = NotifyTask(node_ids=[node_d["id"]], change_selector=None, towhat=None, howmany=1,
+                        notifycondition=change_condition)
         while True:
             callbacks_in_queue.put(cb)
             change_condition.wait()
@@ -1414,35 +1529,34 @@ def nebula_attach_node_to_net(node_d, netid):
     ind = attached_netids.index(nebulanetid)
     node_d["mac_addr"] = nebulanode["TEMPLATE"]["NIC"][ind]["MAC"]
 
-    dbid = add_interface_db(node_d,netid)
-
+    dbid = add_interface_db(node_d, netid)
 
     return dbid
 
 
-
+#TODO implement maxtime check
 def change_node_state(nodeid, whattodo, waitforit=True):
-    OPTIONS = [ "hold", "shutdown", "stop", "resume"]
-    VM_STATE=["INIT", "PENDING", "HOLD", "ACTIVE", "STOPPED", "SUSPENDED", "DONE", "FAILED", "POWEROFF", "UNDEPLOYED"]
+    OPTIONS = ["hold", "shutdown", "stop", "resume"]
+    VM_STATE = ["INIT", "PENDING", "HOLD", "ACTIVE", "STOPPED", "SUSPENDED", "DONE", "FAILED", "POWEROFF", "UNDEPLOYED"]
 
-    state_action = { ("POWEROFF","LCM_INIT"): ["resume"],
-                     ("ACTIVE","RUNNING"): ["stop","suspend","poweroff","undeploy","reboot"],
-                     ("STOPPED","LCM_INIT"): ["resume"],
-                     ("UNDEPLOYED","LCM_INIT"): ["resume"],
-                     ("SUSPENDED","LCM_INIT"): ["resume"]}
+    state_action = {("POWEROFF", "LCM_INIT"): ["resume"],
+                    ("ACTIVE", "RUNNING"): ["stop", "suspend", "poweroff", "undeploy", "reboot"],
+                    ("STOPPED", "LCM_INIT"): ["resume"],
+                    ("UNDEPLOYED", "LCM_INIT"): ["resume"],
+                    ("SUSPENDED", "LCM_INIT"): ["resume"]}
 
-    wanted_lcmstate_after_action = { "resume" : "RUNNING",
-                                      "stop" : "LCM_INIT",
-                                      "suspend" : "LCM_INIT",
-                                      "poweroff" : "LCM_INIT",
-                                      "undeploy" : "LCM_INIT",
-                                      "reboot" : "RUNNING" }
-    wanted_vmstate_after_action = { "resume" : "ACTIVE",
-                                      "stop" : "STOPPED",
-                                      "suspend" : "SUSPENDED",
-                                      "poweroff" : "POWEROFF",
-                                      "undeploy" :"UNDEPLOYED",
-                                      "reboot" : "ACTIVE" }
+    wanted_lcmstate_after_action = {"resume": "RUNNING",
+                                    "stop": "LCM_INIT",
+                                    "suspend": "LCM_INIT",
+                                    "poweroff": "LCM_INIT",
+                                    "undeploy": "LCM_INIT",
+                                    "reboot": "RUNNING"}
+    wanted_vmstate_after_action = {"resume": "ACTIVE",
+                                   "stop": "STOPPED",
+                                   "suspend": "SUSPENDED",
+                                   "poweroff": "POWEROFF",
+                                   "undeploy": "UNDEPLOYED",
+                                   "reboot": "ACTIVE"}
 
     node_d = get_node_db(nodeid)
 
@@ -1450,38 +1564,117 @@ def change_node_state(nodeid, whattodo, waitforit=True):
 
         states_d = get_node_state_nebula(node_d["internal_id"])
 
-        statetuple = (states_d["vm_state"],states_d["lcm_state"])
+        statetuple = (states_d["vm_state"], states_d["lcm_state"])
 
         if statetuple in state_action:
             if whattodo in state_action[statetuple]:
-                out, stderr = execute_cmd("onevm %s %s" % (node_d["internal_id"], whattodo))
+                out, stderr = run_cmd("onevm %s %s" % (node_d["internal_id"], whattodo))
                 if out:
-                    debug_log_print("error changing state","onevm %s %s" % (node_d["internal_id"], whattodo), out)
-                    raise KypoError("error changing state"+ out)
+                    debug_log_print("error changing state", "onevm %s %s" % (node_d["internal_id"], whattodo), out)
+                    raise GeneralAPIError("error changing state" + out)
 
                 if waitforit:
                     change_condition = threading.Condition()
                     with change_condition:
-                        cb = NotifyTask(node_ids=[nodeid], change_selector="LCM_STATE", towhat=LCMSTATE2NUM[wanted_lcmstate_after_action[whattodo]], howmany=1, notifycondition=change_condition)
+                        cb = NotifyTask(node_ids=[nodeid], change_selector="LCM_STATE",
+                                        towhat=LCMSTATE2NUM[wanted_lcmstate_after_action[whattodo]], howmany=1,
+                                        notifycondition=change_condition)
                         callbacks_in_queue.put(cb)
                         while True:
-                            if get_node_state_nebula(node_d["internal_id"],"LCM_STATE" ) == wanted_lcmstate_after_action[whattodo] :
+                            if get_node_state_nebula(node_d["internal_id"])["LCM_STATE"] == \
+                                    wanted_lcmstate_after_action[whattodo]:
                                 break
                             else:
                                 change_condition.wait()
 
             else:
-                debug_log_print("command %s not possible in vm state: %s , lcm state %s" % (whattodo, states_d["vm_state"],states_d["lcm_state"]))
-                raise KypoError("command %s not possible in vm state: %s , lcm state %s" % (whattodo, states_d["vm_state"],states_d["lcm_state"]))
+                debug_log_print("command %s not possible in vm state: %s , lcm state %s" % (
+                    whattodo, states_d["vm_state"], states_d["lcm_state"]))
+                raise GeneralAPIError("command %s not possible in vm state: %s , lcm state %s" % (
+                    whattodo, states_d["vm_state"], states_d["lcm_state"]))
         else:
-            debug_log_print("in vm state: %s , lcm state %s is not possible to change state" % (states_d["vm_state"],states_d["lcm_state"]))
-            raise KypoError("in vm state: %s , lcm state %s is not possible to change state" % (states_d["vm_state"],states_d["lcm_state"]))
+            debug_log_print("in vm state: %s , lcm state %s is not possible to change state" % (
+                states_d["vm_state"], states_d["lcm_state"]))
+            raise GeneralAPIError("in vm state: %s , lcm state %s is not possible to change state" % (
+                states_d["vm_state"], states_d["lcm_state"]))
 
-        node_d["state"] = wanted_vmstate_after_action[whattodo]
-        update_node_db(nodeid, node_d)
 
-    else: #OpenStack
+    else:  #OpenStack
         pass
+
+    return True
+
+
+#TODO implement maxtime check
+def change_node_state_cruder(nodeid, desiredstate, waitforit=True):
+    OPTIONS = ["hold", "shutdown", "stop", "resume"]
+    VM_STATE = ["INIT", "PENDING", "HOLD", "ACTIVE", "STOPPED", "SUSPENDED", "DONE", "FAILED", "POWEROFF", "UNDEPLOYED"]
+
+    state_action = {("POWEROFF", "LCM_INIT"): ["resume"],
+                    ("ACTIVE", "RUNNING"): ["stop", "suspend", "poweroff", "undeploy", "reboot"],
+                    ("STOPPED", "LCM_INIT"): ["resume"],
+                    ("UNDEPLOYED", "LCM_INIT"): ["resume"],
+                    ("SUSPENDED", "LCM_INIT"): ["resume"]}
+
+    wanted_vmstate_after_action = {"resume": "ACTIVE",
+                                   "stop": "STOPPED",
+                                   "suspend": "SUSPENDED",
+                                   "poweroff": "POWEROFF",
+                                   "undeploy": "UNDEPLOYED",
+                                   "reboot": "ACTIVE"}
+    neededstate2action = {v: k for k, v in wanted_vmstate_after_action.iteritems()}
+
+    if desiredstate not in neededstate2action:
+        raise WrongRequestException(
+            "there is no such state possible, choose one of {0}".format(neededstate2action.keys()))
+
+    node_d = get_node_db(nodeid)
+
+    if node_d["platform"] == "nebula":
+
+        states_d = get_node_state_nebula(node_d["internal_id"])
+
+        statetuple = (states_d["vm_state"], states_d["lcm_state"])
+
+        if statetuple in state_action:
+            whattodo = neededstate2action.get(desiredstate)
+            if neededstate2action.get(desiredstate) in state_action[statetuple]:
+                out, stderr = run_cmd("onevm %s %s" % (node_d["internal_id"], whattodo))
+                if out:
+                    debug_log_print("error changing state", "onevm %s %s" % (node_d["internal_id"], whattodo), out)
+                    raise GeneralAPIError("error changing state" + out)
+
+                if waitforit:
+                    change_condition = threading.Condition()
+                    with change_condition:
+                        cb = NotifyTask(node_ids=[nodeid], change_selector="STATE",
+                                        towhat=VMSTATE2NUM[desiredstate], howmany=1,
+                                        notifycondition=change_condition)
+                        callbacks_in_queue.put(cb)
+                        while True:
+                            if get_node_state_nebula(node_d["internal_id"])["STATE"] == desiredstate:
+                                break
+                            else:
+                                change_condition.wait()
+
+            else:
+                # debug_log_print("change to state {0} not possible from state {1}, lcm_state: \
+                # {2}".format(desiredstate, states_d["vm_state"],states_d["lcm_state"]))
+                raise GeneralAPIError("change to state {0} not possible from state {1}, lcm_state: \
+                 {2}".format(desiredstate, states_d["vm_state"], states_d["lcm_state"]))
+        else:
+            debug_log_print(
+                "in vm state: {0:s} , lcm state {1:s} is not possible to change state".format(states_d["vm_state"],
+                                                                                              states_d["lcm_state"]))
+            raise GeneralAPIError(
+                "in vm state: {0:s} , lcm state {1:s} is not possible to change state".format(states_d["vm_state"],
+                                                                                              states_d["lcm_state"]))
+
+
+    else:  #OpenStack
+        pass
+
+    return True
 
 
 def connect_nodes_nebula(n1, n2, mac1=None, mac2=None):
@@ -1490,23 +1683,22 @@ def connect_nodes_nebula(n1, n2, mac1=None, mac2=None):
     if not mac2:
         mac2 = str(MacAddress.from_parts(macprefix=MAC_PREFIX_DEFAULT))
 
-
     node1_d = get_node_db(n1)
     # node1_d["mac_addr"] = mac1
     node2_d = get_node_db(n2)
 
-    check_state_nebula(node1_d["internal_id"],lcmstate="RUNNING", tries=1)
-    check_state_nebula(node2_d["internal_id"],lcmstate="RUNNING", tries=1)
+    check_state_nebula(node1_d["internal_id"], lcmstate="RUNNING", tries=1)
+    check_state_nebula(node2_d["internal_id"], lcmstate="RUNNING", tries=1)
 
-    netid = create_vxlan_nebulanet(mac=mac1,size=1)
+    netid = create_link(mac1=mac1)
 
     net_d = get_network_db(netid)
     try:
-        intfid1 = attach_node_to_net(node1_d,netid)
+        intfid1 = attach_node_to_net(node1_d, netid)
     except BaseException as e:
         debug_log_print_ext("attach node to net error", e),
         delete_net_db(netid)
-        execute_cmd("onevnet delete {0}".format(net_d["nebulaid"]))
+        run_cmd("onevnet delete {0}".format(net_d["nebulaid"]))
         raise
 
     net_d = get_network_db(netid)
@@ -1527,10 +1719,10 @@ def connect_nodes_nebula(n1, n2, mac1=None, mac2=None):
             delete_net_db(netid)
         except:
             pass
-        execute_cmd("onevnet delete {0}".format(net_d["nebulaid"]))
+        run_cmd("onevnet delete {0}".format(net_d["nebulaid"]))
         raise
 
-    return { "id": netid , "interface_id1": intfid1 , "interface_id2": intfid2}
+    return {"id": netid, "interface_id1": intfid1, "interface_id2": intfid2}
 
 
 def create_node(templatename, **kwargs):
@@ -1542,14 +1734,13 @@ def create_node(templatename, **kwargs):
         pass
 
 
-def create_node_nebula(templateid,nics=None,tags=None, **kwargs):
-
+def create_node_nebula(templateid, nics=None, tags=None, **kwargs):
     #TODO nics
 
     ownertag = tdata.ownertag
     if not tags:
         tags = [ownertag]
-    if tags is not None and isinstance(tags,basestring):
+    if tags is not None and isinstance(tags, basestring):
         tags = set(tags.split(","))
         tags.add(ownertag)
 
@@ -1557,12 +1748,11 @@ def create_node_nebula(templateid,nics=None,tags=None, **kwargs):
 
     vmtempl = string.Template(templ_d["template"])
 
-    for k,v in kwargs.iteritems():
+    for k, v in kwargs.iteritems():
         templ_d["defaultvalues"][k] = v
 
-    node_d = { "name": kwargs.get("name",None),
-               "state": "PENDING",
-               "platform": "nebula"}
+    node_d = {"name": kwargs.get("name", None),
+              "platform": "nebula"}
 
     # add to db
     db_id = add_node_db(node_d)
@@ -1575,7 +1765,6 @@ def create_node_nebula(templateid,nics=None,tags=None, **kwargs):
             pass
         add_tag_node(tag, db_id)
 
-
     temp_templ_f = tempfile.NamedTemporaryFile(delete=False)
     temp_templ_f.write(vmtempl.safe_substitute(templ_d["defaultvalues"]))
     # debug_log_print(vmtempl.safe_substitute(templ_d["defaultvalues"]))
@@ -1583,12 +1772,13 @@ def create_node_nebula(templateid,nics=None,tags=None, **kwargs):
     temp_templ_f.close()
     tname = temp_templ_f.name
 
-    out, stderr = execute_cmd("onevm create %s" % (tname))
+    out, stderr = run_cmd("onevm create %s" % (tname))
 
     if "ID:" != out[:3]:
         delete_node_db(db_id)
-        debug_log_print_ext("failed node creation", vmtempl.safe_substitute(templ_d["defaultvalues"]), "onevm create %s" % (tname), out, )
-        raise KypoError("Error creating vm")
+        debug_log_print_ext("failed node creation", vmtempl.safe_substitute(templ_d["defaultvalues"]),
+                            "onevm create %s" % (tname), out, )
+        raise GeneralAPIError("Error creating vm")
     # template was ok, delete
     os.unlink(tname)
 
@@ -1598,7 +1788,8 @@ def create_node_nebula(templateid,nics=None,tags=None, **kwargs):
     change_condition = threading.Condition()
     with change_condition:
         inittime = datetime.utcnow()
-        cb = NotifyTask(node_ids=[db_id], change_selector=None, towhat=None, howmany=1, notifycondition=change_condition)
+        cb = NotifyTask(node_ids=[db_id], change_selector=None, towhat=None, howmany=1,
+                        notifycondition=change_condition)
         nebulainfo = None
         # pokud se de 15 vterin neobjevi v nebule , tak je to fail
         while totimestamp(inittime) + 15 >= totimestamp(datetime.utcnow()):
@@ -1613,20 +1804,19 @@ def create_node_nebula(templateid,nics=None,tags=None, **kwargs):
     if not nebulainfo:
         delete_node_db(db_id)
         debug_log_print_ext("too long wait for scheduling")
-        raise KypoError("too long wait for scheduling")
+        raise GeneralAPIError("too long wait for scheduling")
 
     time.sleep(4.5)
     nebulainfo = info_node_nebula(internalid)
     usertemplate = nebulainfo["USER_TEMPLATE"]
-    sched_msg = usertemplate.get("SCHED_MESSAGE","")
+    sched_msg = usertemplate.get("SCHED_MESSAGE", "")
     if "No host with enough capacity to deploy the VM" in sched_msg:
         debug_log_print_ext("No host with enough capacity to deploy the VM")
-        out, stderr = execute_cmd("onevm delete {0}".format(internalid))
+        out, stderr = run_cmd("onevm delete {0}".format(internalid))
         delete_node_db(db_id)
-        raise KypoError("too long wait for scheduling; {0}".format(out))
+        raise GeneralAPIError("too long wait for scheduling; {0}".format(out))
 
     node_d["name"] = nebulainfo["NAME"]
-    node_d["state"] = "ACTIVE"
     node_d["internal_id"] = internalid
 
     update_node_db(db_id, node_d)
@@ -1636,9 +1826,7 @@ def create_node_nebula(templateid,nics=None,tags=None, **kwargs):
     return db_id
 
 
-
 def delete_node(dbid):
-
     node_d = get_node_db(dbid)
 
     if node_d["platform"] == "nebula":
@@ -1647,46 +1835,42 @@ def delete_node(dbid):
 
         nodeinterfaces = get_interfaces_db(netid=None, nodeid=dbid)
 
-        if internalid: # node mozna nikdy nebyla vyvorena (i kdyz to by se nemelo stat)
-            out, stderr = execute_cmd("onevm delete {0}".format(internalid))
-            if out and not "[VirtualMachineAction] Error getting virtual machine" in out:
-                raise KypoError(out)
+        if internalid:  # node mozna nikdy nebyla vyvorena (i kdyz to by se nemelo stat)
+            out, stderr = run_cmd("onevm delete {0}".format(internalid))
+            # if out and not "[VirtualMachineAction] Error getting virtual machine" in out:
+            #     raise GeneralAPIError(out)
 
         delete_node_db(dbid)
-        for intf in nodeinterfaces:
-            try:
-                decrease_net_use_db(intf["net_id"])
-            except psycopg2.IntegrityError: #to by snad nemelo nastat, ale kdyz uz je smazane VM
-                pass
 
     else:
         pass
     return True
 
 
-
 def add_addrarr_nebulanet(netid, mac, size):
-
     net_d = get_network_db(netid)
 
     internalid = net_d["nebulaid"]
 
-    out, stderr = execute_cmd("onevnet addar {0} --mac {1} --size {2}".format(internalid, mac, size))
+    out, stderr = run_cmd("onevnet addar {0} --mac {1} --size {2}".format(internalid, mac, size))
 
     if out:
-        debug_log_print_ext("address range wasn't added to net {0}: ".format(internalid) , out)
-        KypoError("address range wasn't added to net")
+        debug_log_print_ext("address range wasn't added to net {0}: ".format(internalid), out)
+        GeneralAPIError("address range wasn't added to net")
     increase_net_size_db(netid, howmuch=size)
 
 
 def remove_addrarr_nebulanet(netid, startmac):
-
     net_d = get_network_db_and_internal(netid)
 
     arpool = net_d.get("internal_info", {}).get("AR_POOL")
     if not arpool:
-        debug_log_print_ext("underlying nebulanetwork isn't available or has no Address Ranges; netid: {0}, startmac: {1}".format(netid,startmac))
-        raise NoSuchObjectException("underlying nebulanetwork isn't available or has no Address Ranges; netid: {0}, startmac: {1}".format(netid,startmac))
+        debug_log_print_ext(
+            "underlying nebulanetwork isn't available or has no Address Ranges; netid: {0}, startmac: {1}".format(netid,
+                                                                                                                  startmac))
+        raise NoSuchObjectException(
+            "underlying nebulanetwork isn't available or has no Address Ranges; netid: {0}, startmac: {1}".format(netid,
+                                                                                                                  startmac))
 
     for addrrange in arpool:
         ar_id = addrrange["AR_ID"]
@@ -1696,33 +1880,26 @@ def remove_addrarr_nebulanet(netid, startmac):
         if mac == startmac:
             break
     if mac != startmac:
-        debug_log_print_ext("there is no Address Range in netid: {0} with startmac: {1}".format(netid,startmac))
-        raise NoSuchObjectException("there is no Address Range in netid: {0} with startmac: {1}".format(netid,startmac))
+        debug_log_print_ext("there is no Address Range in netid: {0} with startmac: {1}".format(netid, startmac))
+        raise NoSuchObjectException(
+            "there is no Address Range in netid: {0} with startmac: {1}".format(netid, startmac))
 
     for i in range(4):
-        out, stderr = execute_cmd("onevnet rmar {0} {1}".format(net_d["nebulaid"], ar_id))
+        out, stderr = run_cmd("onevnet rmar {0} {1}".format(net_d["nebulaid"], ar_id))
         if not out or "Address Range does not exist" in out:
             break
         time.sleep(2.5)
 
     if out and "Address Range does not exist" not in out:
         debug_log_print_ext("addr range removal unsuccessful", out)
-        raise KypoError(out)
+        raise GeneralAPIError(out)
 
     decrease_net_size_db(netid, size)
 
     return True
 
 
-
-
-
-    pass
-
-
-
 def list_nodes_nebula():
-
     nodes_info_lock.acquire()
     nodes = copy.deepcopy(NODES_INFO)
     nodes_info_lock.release()
@@ -1739,6 +1916,7 @@ def info_node_nebula(nebulaid):
         debug_log_print_ext("node with nebula id {0} doesn't exist in nebula".format(nebulaid))
         raise NoSuchObjectException("node with nebula id {0} doesn't nebula".format(nebulaid))
     return node
+
 
 def info_nebulanet(nebulaid):
     nets_info_lock.acquire()
@@ -1760,11 +1938,11 @@ def recursive_element_list(elem):
 
         tkeys = map(lambda a: a[0], subs)
         subs_d = {}
-        for k,v in subs:
+        for k, v in subs:
 
             #v xml je v jedne urovni vice elementu se stejnym jmenem
             if tkeys.count(k) > 1:
-                arr = subs_d.get(k,[])
+                arr = subs_d.get(k, [])
                 arr.append(v)
                 subs_d[k] = arr
             else:
@@ -1790,9 +1968,7 @@ def recursive_element_list(elem):
         return k, v
 
 
-
 def list_nebulanets_xml():
-
     nets_info_lock.acquire()
     nets = copy.deepcopy(NETS_INFO)
     nets_info_lock.release()
@@ -1800,31 +1976,18 @@ def list_nebulanets_xml():
     return nets
 
 
-
-def list_vxlan_nebulanets():
+def nebulaid_to_vxlanid_mapping():
     vnets = list_nebulanets_xml()
 
-    vxvnets = {}
-    for i in vnets.keys():
-        if "kypo vxlan-" not in vnets[i]["NAME"]:
+    nebulaids2vxids = {}
+    for i in vnets.iterkeys():
+        if vnets[i]["VLAN"] != "1":
             continue
-
-        vxvnets[i] = vnets[i]
-    return vxvnets
-
-def list_public_nebulanets():
-    nets = list_nebulanets_xml()
-    pubnets = {}
-
-    for nk in nets.keys():
-        if nets[nk]["NAME"].startswith(PUBLIC_NET_NAME_TEMPL[:-3]):
-            continue
-        pubnets[nk] = nets[nk]
-    return pubnets
+        nebulaids2vxids[i] = vnets[i]["VLAN_ID"]
+    return nebulaids2vxids
 
 
 def get_node_state_nebula(nebulaid):
-
     ni = info_node_nebula(nebulaid)
     vm_state = ni["STATE"]
     lcm_state = ni["LCM_STATE"]
@@ -1832,6 +1995,7 @@ def get_node_state_nebula(nebulaid):
              "STATE": NUM2VMSTATE[vm_state], "LCM_STATE": NUM2LCMSTATE[lcm_state]}
 
     return value
+
 
 def check_state_nebula(nebulaid, vmstate=None, lcmstate=None, tries=1):
     realvmstate = None
@@ -1846,18 +2010,19 @@ def check_state_nebula(nebulaid, vmstate=None, lcmstate=None, tries=1):
             if lcmstate:
                 reallcmstate = states["lcm_state"]
 
-            if vmstate == realvmstate and lcmstate==reallcmstate:
+            if vmstate == realvmstate and lcmstate == reallcmstate:
                 return True
 
             if tries == 1:
-                debug_log_print_ext("attempted action isn't possible due to node being in wrong state (current: {0} ; needed: {1}".format((realvmstate,reallcmstate),(vmstate,lcmstate)))
+                debug_log_print_ext(
+                    "attempted action isn't possible due to node being in wrong state (current: {0} ; needed: {1}".format(
+                        (realvmstate, reallcmstate), (vmstate, lcmstate)))
                 raise WrongStateForActionException("attempted action isn't possible due to node being in wrong state")
-            tries = tries - 1
+            tries -= 1
 
             callbacks_in_queue.put(cb)
             change_condition.wait()
     return True
-
 
 
 def get_node_state(nodeid, selector=None):
@@ -1867,10 +2032,6 @@ def get_node_state(nodeid, selector=None):
 
     if platform == "nebula":
         value = get_node_state_nebula(db_node_info["internal_id"])
-        state = value["vm_state"]
-        if db_node_info["state"] != state:
-            db_node_info["state"] = state
-            update_node_db(nodeid, db_node_info)
 
     else:
         #OpenStack
@@ -1881,15 +2042,16 @@ def get_node_state(nodeid, selector=None):
 
     return value
 
+
 def list_nebula_images():
     try:
-        out, stderr = execute_cmd_e("oneimage list -x")
+        out, stderr = run_cmd_e("oneimage list -x")
         tree = ET.fromstring(out)
 
         #root = tree.getroot()
         imgs = {}
         for img in tree:
-            k,v = recursive_element_list(img)
+            k, v = recursive_element_list(img)
             id = v['ID']
             imgs[id] = v
     except RuntimeError as e:
@@ -1898,16 +2060,18 @@ def list_nebula_images():
     return imgs
 
 
-
 from flask import Flask, url_for, jsonify, make_response, request
 from flask.ext.httpauth import HTTPBasicAuth
+
 auth = HTTPBasicAuth()
 
 app = Flask(__name__)
 
+
 @app.errorhandler(404)
 def not_found(error):
-    return make_response(jsonify({"status": "failure", 'message': 'Not found (no handler for this path/action)'}), 404)
+    return make_response(jsonify({"status": "fail", 'message': 'Not found (no handler for this path/action)'}), 404)
+
 
 @auth.verify_password
 def verify_password(username, password):
@@ -1925,13 +2089,14 @@ def verify_password(username, password):
 
         # derivedkey = hashlib.pbkdf2_hmac('sha256', password, res_d["salt"], 100000)
         # hexalified = binascii.hexlify(derivedkey)
-        hexalified = hashlib.sha512(password+res_d["salt"]).hexdigest()
+        hexalified = hashlib.sha512(password + res_d["salt"]).hexdigest()
 
     return res_d["password"] == hexalified
 
+
 @auth.error_handler
 def unauthorized():
-    return make_response(jsonify({"status": "failure", 'message': 'Unauthorized access'}), 403)
+    return make_response(jsonify({"status": "fail", 'message': 'Unauthorized access'}), 403)
 
 
 @app.route('/')
@@ -1958,6 +2123,7 @@ def api_deletions():
 
     return everything
 
+
 @app.route('/api/v1.0/tags', methods=['GET'])
 @auth.login_required
 def api_tags_list():
@@ -1975,6 +2141,7 @@ def api_tags_list():
     answ["status"] = status
 
     return make_response(jsonify(answ))
+
 
 @app.route('/api/v1.0/tags', methods=['POST'])
 @auth.login_required
@@ -1996,8 +2163,8 @@ def api_tags_add():
                     added.append(t)
                 except DuplicateNameException:
                     pass
-    except KypoError as e:
-        status = "failure"
+    except GeneralAPIError as e:
+        status = "fail"
         answ["message"] = repr(e)
         answ["data"]["description"] = tdata.extended_error_log
     except Exception as e:
@@ -2008,6 +2175,7 @@ def api_tags_add():
     answ["status"] = status
 
     return make_response(jsonify(answ))
+
 
 @app.route('/api/v1.0/images', methods=['GET'])
 @auth.login_required
@@ -2027,6 +2195,7 @@ def api_images_list():
 
     return make_response(jsonify(answ))
 
+
 @app.route('/api/v1.0/templates', methods=['GET'])
 @auth.login_required
 def api_templates_list():
@@ -2036,8 +2205,8 @@ def api_templates_list():
     try:
         data = get_templates_db(request.args.get("user", None), extractdefaults=False)
         answ["data"]["templates"] = data
-    except KypoError as e:
-        status = "failure"
+    except GeneralAPIError as e:
+        status = "fail"
         answ["message"] = repr(e)
         answ["data"]["description"] = tdata.extended_error_log
     except BaseException as e:
@@ -2048,6 +2217,7 @@ def api_templates_list():
     answ["status"] = status
 
     return make_response(jsonify(answ))
+
 
 @app.route('/api/v1.0/templates', methods=['POST'])
 @auth.login_required
@@ -2060,11 +2230,11 @@ def api_templates_add():
         reqdata = json.loads(request.data)
         templstring = reqdata.pop("template")
         name = reqdata.pop("name")
-        dbid = add_nodetemplate_db(templstring,name,**reqdata)
+        dbid = add_nodetemplate_db(templstring, name, **reqdata)
         data = {"name": name, "id": dbid}
         answ["data"]["template"] = data
-    except KypoError as e:
-        status = "failure"
+    except GeneralAPIError as e:
+        status = "fail"
         answ["message"] = repr(e)
         answ["data"]["description"] = tdata.extended_error_log
     except Exception as e:
@@ -2075,6 +2245,7 @@ def api_templates_add():
     answ["status"] = status
 
     return make_response(jsonify(answ))
+
 
 @app.route('/api/v1.0/templates/<selector>', methods=['GET'])
 @auth.login_required
@@ -2092,8 +2263,8 @@ def api_template_get(selector):
     try:
         data = get_nodetemplate_db(templid=templid, templname=templname, extractdefaults=False)
         answ["data"]["template"] = data
-    except KypoError as e:
-        status = "failure"
+    except GeneralAPIError as e:
+        status = "fail"
         answ["message"] = repr(e)
         answ["data"]["description"] = tdata.extended_error_log
     except BaseException as e:
@@ -2106,7 +2277,6 @@ def api_template_get(selector):
     return make_response(jsonify(answ))
 
 
-
 @app.route('/api/v1.0/nodes', methods=['GET'])
 @auth.login_required
 def api_nodes_list():
@@ -2114,7 +2284,7 @@ def api_nodes_list():
     answ = {"data": {}}
 
     try:
-        data = get_nodes_db_and_internal()
+        data = get_nodes_db_for_output()
         answ["data"]["nodes"] = data
     except BaseException as e:
         status = "error"
@@ -2132,15 +2302,15 @@ def api_node_get(nodeid):
     status = "success"
     answ = {"data": {}}
     try:
-        data = get_node_db_and_internal(nodeid)
+        data = get_node_db_for_output(nodeid)
         answ["data"]["node"] = data
     except PrivilegeException as e:
-        status = "failure"
+        status = "fail"
         debug_log_print(e)
         answ["message"] = repr(e)
         answ["data"]["description"] = tdata.extended_error_log + "you are neither owner nor admin"
     except NoSuchObjectException as e:
-        status = "failure"
+        status = "fail"
         debug_log_print(e)
         answ["message"] = repr(e)
         answ["data"]["description"] = tdata.extended_error_log + "no such node id exists"
@@ -2154,6 +2324,7 @@ def api_node_get(nodeid):
 
     return make_response(jsonify(answ))
 
+
 @app.route('/api/v1.0/nodes/<int:nodeid>/status', methods=['GET'])
 @auth.login_required
 def api_node_get_status(nodeid):
@@ -2163,15 +2334,15 @@ def api_node_get_status(nodeid):
         data = get_node_state(nodeid)
         answ["data"] = data
     except PrivilegeException as e:
-        status = "failure"
+        status = "fail"
         debug_log_print(e)
         answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log +"; you are neither owner nor admin"
+        answ["data"]["description"] = tdata.extended_error_log + "; you are neither owner nor admin"
     except NoSuchObjectException as e:
-        status = "failure"
+        status = "fail"
         debug_log_print(e)
         answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log +"; no such node id exists"
+        answ["data"]["description"] = tdata.extended_error_log + "; no such node id exists"
     except BaseException as e:
         status = "error"
         debug_log_print(e)
@@ -2189,27 +2360,27 @@ def api_node_get_vncinfo(nodeid):
     status = "success"
     answ = {"data": {}}
     try:
-        nodeinfo = get_node_db_and_internal(nodeid)
+        nodeinfo = get_node_db_for_output(nodeid)
         if nodeinfo["state"] == "UNKNOWN":
             raise NoSuchObjectException("underlying nebula node probably doesn't exist ")
         if get_node_state(nodeid, selector="lcm_state") != "RUNNING":
             raise WrongStateForActionException("that node isn't running")
         internal = nodeinfo["internal_info"]
-        info = { "host" : internal["HISTORY_RECORDS"]["HISTORY"]["HOSTNAME"],
-                 "port" : internal["TEMPLATE"]["GRAPHICS"]["PORT"],
-                 "password": internal["TEMPLATE"]["GRAPHICS"]["PASSWD"] }
+        info = {"host": internal["HISTORY_RECORDS"]["HISTORY"]["HOSTNAME"],
+                "port": internal["TEMPLATE"]["GRAPHICS"]["PORT"],
+                "password": internal["TEMPLATE"]["GRAPHICS"]["PASSWD"]}
 
         answ["data"]["vncinfo"] = info
     except PrivilegeException as e:
-        status = "failure"
+        status = "fail"
         debug_log_print(e)
         answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log +"; you are neither owner nor admin"
+        answ["data"]["description"] = tdata.extended_error_log + "; you are neither owner nor admin"
     except NoSuchObjectException as e:
-        status = "failure"
+        status = "fail"
         debug_log_print(e)
         answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log +"; no such node id exists"
+        answ["data"]["description"] = tdata.extended_error_log + "; no such node id exists"
     except BaseException as e:
         status = "error"
         debug_log_print(e)
@@ -2219,8 +2390,6 @@ def api_node_get_vncinfo(nodeid):
     answ["status"] = status
 
     return make_response(jsonify(answ))
-
-
 
 
 @app.route('/api/v1.0/nodes/<int:nodeid>', methods=['DELETE'])
@@ -2233,8 +2402,8 @@ def api_node_delete(nodeid):
     try:
         delete_node(nodeid)
         answ["data"]["deleted"] = True
-    except KypoError as e:
-        status = "failure"
+    except GeneralAPIError as e:
+        status = "fail"
         answ["message"] = repr(e)
         answ["data"]["description"] = tdata.extended_error_log
     except Exception as e:
@@ -2245,7 +2414,6 @@ def api_node_delete(nodeid):
     answ["status"] = status
 
     return make_response(jsonify(answ))
-
 
 
 @app.route('/api/v1.0/nodes', methods=['POST'])
@@ -2258,10 +2426,10 @@ def api_node_create():
     try:
         reqdata = json.loads(request.data)
         templname = reqdata.pop("templatename")
-        dbid = create_node(templname,**reqdata)
-        answ["data"]["node"] = { dbid: get_node_db_and_internal(dbid) }
-    except KypoError as e:
-        status = "failure"
+        dbid = create_node(templname, **reqdata)
+        answ["data"]["node"] = {dbid: get_node_db_for_output(dbid)}
+    except GeneralAPIError as e:
+        status = "fail"
         answ["message"] = repr(e)
         answ["data"]["description"] = tdata.extended_error_log
     except Exception as e:
@@ -2274,8 +2442,6 @@ def api_node_create():
     return make_response(jsonify(answ))
 
 
-
-
 @app.route('/api/v1.0/nets', methods=['GET'])
 @auth.login_required
 def api_nets_list():
@@ -2283,7 +2449,7 @@ def api_nets_list():
     answ = {"data": {}}
 
     try:
-        data = get_networks_db_and_internal()
+        data = get_networks_db_for_output()
         answ["data"]["nets"] = data
     except BaseException as e:
         status = "error"
@@ -2294,18 +2460,17 @@ def api_nets_list():
 
     return make_response(jsonify(answ))
 
+
 @app.route('/api/v1.0/nets/<int:netid>', methods=['DELETE'])
 @auth.login_required
 def api_net_delete(netid):
     status = "success"
     answ = {"data": {}}
-    # debug_log_print(request.data)
-
     try:
         remove_network(netid)
         answ["data"]["deleted"] = True
-    except KypoError as e:
-        status = "failure"
+    except GeneralAPIError as e:
+        status = "fail"
         answ["message"] = repr(e)
         answ["data"]["description"] = tdata.extended_error_log
     except Exception as e:
@@ -2335,8 +2500,8 @@ def api_net_create_link():
         data = connect_nodes_nebula(n1, n2, **reqdata)
 
         answ["data"]["deleted"] = data
-    except KypoError as e:
-        status = "failure"
+    except GeneralAPIError as e:
+        status = "fail"
         answ["message"] = repr(e)
         answ["data"]["description"] = tdata.extended_error_log
     except Exception as e:
@@ -2349,22 +2514,20 @@ def api_net_create_link():
     return make_response(jsonify(answ))
 
 
-
-
 @app.route('/api/v1.0/nets/<int:netid>', methods=['GET'])
 @auth.login_required
 def api_net_get(netid):
     status = "success"
     answ = {"data": {}}
     try:
-        data = get_network_db_and_internal(netid)
+        data = get_network_db_for_output(netid)
         answ["data"]["net"] = data
     except PrivilegeException as e:
-        status = "failure"
+        status = "fail"
         answ["message"] = repr(e)
         answ["data"]["description"] = tdata.extended_error_log + "you are neither owner nor admin"
     except NoSuchObjectException as e:
-        status = "failure"
+        status = "fail"
         answ["message"] = repr(e)
         answ["data"]["description"] = tdata.extended_error_log + "no such net id exists"
     except BaseException as e:
@@ -2376,6 +2539,7 @@ def api_net_get(netid):
     answ["status"] = status
 
     return make_response(jsonify(answ))
+
 
 @app.route('/api/v1.0/nets/<int:netid>/interfaces', methods=['GET'])
 @auth.login_required
@@ -2383,15 +2547,15 @@ def api_net_interfaces_get(netid):
     status = "success"
     answ = {"data": {}}
     try:
-        get_network_db(netid)
+        check_user_privilege_net(netid)
         data = get_interfaces_db(netid=netid)
         answ["data"]["interfaces"] = data
     except PrivilegeException as e:
-        status = "failure"
+        status = "fail"
         answ["message"] = repr(e)
         answ["data"]["description"] = tdata.extended_error_log + "you are neither owner nor admin"
     except NoSuchObjectException as e:
-        status = "failure"
+        status = "fail"
         answ["message"] = repr(e)
         answ["data"]["description"] = tdata.extended_error_log + "no such net id exists"
     except BaseException as e:
@@ -2403,7 +2567,6 @@ def api_net_interfaces_get(netid):
     answ["status"] = status
 
     return make_response(jsonify(answ))
-
 
 
 @app.route('/api/v1.0/nodes/<int:nodeid>/interfaces', methods=['GET'])
@@ -2418,11 +2581,11 @@ def api_node_interfaces_get(nodeid):
         data = get_interfaces_db(nodeid=nodeid)
         answ["data"]["interfaces"] = data
     except PrivilegeException as e:
-        status = "failure"
+        status = "fail"
         answ["message"] = repr(e)
         answ["data"]["description"] = tdata.extended_error_log + "you are neither owner nor admin"
     except NoSuchObjectException as e:
-        status = "failure"
+        status = "fail"
         answ["message"] = repr(e)
         answ["data"]["description"] = tdata.extended_error_log + "no such node id exists"
     except BaseException as e:
@@ -2445,11 +2608,11 @@ def api_interface_get(intfid):
         data = get_interface_db(intfid)
         answ["data"]["interface"] = data
     except PrivilegeException as e:
-        status = "failure"
+        status = "fail"
         answ["message"] = repr(e)
         answ["data"]["description"] = tdata.extended_error_log + "you are neither owner nor admin"
     except NoSuchObjectException as e:
-        status = "failure"
+        status = "fail"
         answ["message"] = repr(e)
         answ["data"]["description"] = tdata.extended_error_log + "no such interface id exists"
     except BaseException as e:
@@ -2461,6 +2624,7 @@ def api_interface_get(intfid):
     answ["status"] = status
 
     return make_response(jsonify(answ))
+
 
 @app.route('/api/v1.0/interfaces/<int:intfid>', methods=['DELETE'])
 @auth.login_required
@@ -2473,11 +2637,11 @@ def api_interface_delete(intfid):
 
         answ["data"]["deleted"] = True
     except PrivilegeException as e:
-        status = "failure"
+        status = "fail"
         answ["message"] = repr(e)
         answ["data"]["description"] = tdata.extended_error_log + "you are neither owner nor admin"
     except NoSuchObjectException as e:
-        status = "failure"
+        status = "fail"
         answ["message"] = repr(e)
         answ["data"]["description"] = tdata.extended_error_log + "no such interface id exists"
     except BaseException as e:
@@ -2491,20 +2655,17 @@ def api_interface_delete(intfid):
     return make_response(jsonify(answ))
 
 
-
 if __name__ == '__main__':
+    poller = InfoPoller()
+    poller.setDaemon(daemonic=True)
+    debug_log_print("start poller")
+    poller.start()
+    debug_log_print("started poller")
+    time.sleep(1)
     tdata.DB_CON = open_db2()
     with tdata.DB_CON:
 
-        tdata.username = None
-
-        poller = InfoPoller()
-        poller.setDaemon(daemonic=True)
-        debug_log_print("start poller")
-        poller.start()
-        debug_log_print("started poller")
-        time.sleep(1)
-        if len(sys.argv) >=2 and sys.argv[1] == "server":
+        if len(sys.argv) >= 2 and sys.argv[1] == "server":
 
             callbackdispatcher = CallbackSender()
             callbackdispatcher.setDaemon(daemonic=True)
@@ -2516,8 +2677,10 @@ if __name__ == '__main__':
             # app.run()
 
 
-        elif len(sys.argv) >=2 and sys.argv[1] == "init":
-            add_user("tester", "tester", isadmin=True)
+        elif len(sys.argv) >= 2 and sys.argv[1] == "init":
+            res_d = get_user("tester")
+            if not res_d:
+                add_user("tester", "tester", isadmin=True)
             res_d = get_user("tester")
 
             tdata.username = res_d["name"]
@@ -2525,10 +2688,7 @@ if __name__ == '__main__':
             tdata.extended_error_log = ""
             tdata.ownertag = "owner:{0}".format(res_d["name"])
 
-
-            tdata.username = "tester"
             tdata.extended_error_log = ""
-
 
             nodetmpl = '''CPU=$cpu
 VCPU=$vcpu
@@ -2542,15 +2702,18 @@ RAW=[DATA="<!-- RAW data follows: --><cpu mode='host-model'></cpu>",TYPE="kvm"]
 CONTEXT=[DUMMY="dummy"]
 '''
 
-            default_node_values = dict( image_id = 61,
-                            vnc_passwd = "d3f4u1t_vNc.p4s5W0rD!",
-                            cluster = CLUSTER_NAME,
-                            cpu = 1,
-                            vcpu = 1,
-                            memory = 512,
-                            )
+            default_node_values = dict(image_id=61,
+                                       vnc_passwd="d3f4u1t_vNc.p4s5W0rD!",
+                                       cluster=CLUSTER_NAME,
+                                       cpu=1,
+                                       vcpu=1,
+                                       memory=512,
+            )
 
-            add_nodetemplate_db(nodetmpl,"test_vm1", defaultvalues=json.dumps(default_node_values))
+            try:
+                get_nodetemplate_db(templname="test_vm1")
+            except NoSuchObjectException:
+                add_nodetemplate_db(nodetmpl, "test_vm1", defaultvalues=json.dumps(default_node_values))
 
             nodeid1 = create_node("test_vm1")
             debug_log_print("node created:", nodeid1)
@@ -2559,9 +2722,9 @@ CONTEXT=[DUMMY="dummy"]
 
             time.sleep(60)
 
-            debug_log_print(connect_nodes_nebula(nodeid1,nodeid2,None,None))
-            debug_log_print(connect_nodes_nebula(nodeid1,nodeid2,None,None))
-            debug_log_print(connect_nodes_nebula(nodeid2,nodeid1,None,None))
+            debug_log_print(connect_nodes_nebula(nodeid1, nodeid2, None, None))
+            debug_log_print(connect_nodes_nebula(nodeid1, nodeid2, None, None))
+            debug_log_print(connect_nodes_nebula(nodeid2, nodeid1, None, None))
         else:
             res_d = get_user("tester")
             if not res_d:
@@ -2576,7 +2739,11 @@ CONTEXT=[DUMMY="dummy"]
             # debug_log_print(connect_nodes_nebula(1,2,None,None))
             # debug_log_print(connect_nodes_nebula(1,2,None,None))
 
-            # debug_print(get_node_db_and_internal(2))
+            debug_print(get_nodes_db_for_output())
+            debug_print(get_node_db_for_output(1))
+            debug_print(get_network_db_for_output(1))
+            debug_print(get_networks_db_for_output())
+
             # debug_print(get_interfaces_db(nodeid=2))
             #
             # debug_print(get_node_db_and_internal(2))
@@ -2635,7 +2802,7 @@ CONTEXT=[DUMMY="dummy"]
             # debug_log_print(list_nodes_nebula())
 
 
-        # tdata.DB_CON.close()
-        #pprint.pprint(list_templates_nebula())
+            # tdata.DB_CON.close()
+            #pprint.pprint(list_templates_nebula())
 
     time.sleep(2)

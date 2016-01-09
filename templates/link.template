@@ -1,5 +1,5 @@
 NAME="kypo vxlan-$vlanid"
-DESCRIPTION="kypo network vxlan $vlanid"
+DESCRIPTION="kypo vxlan $vlanid"
 BRIDGE="br-vx$vlanid"
 PHYDEV="br-inet"
 SECURITY_GROUPS="0"
