@@ -118,6 +118,9 @@ nodes_info_lock.acquire()
 nets_info_lock = threading.Lock()
 nets_info_lock.acquire()
 
+CALLBACKCHECK_CONDITON = threading.Condition()
+
+
 
 class InfoPoller(threading.Thread):
     def run(self):
@@ -133,46 +136,17 @@ class InfoPoller(threading.Thread):
 
         time.sleep(2)
 
-        callbacks_to_check = []
-        resend_notify_signal = []
-
         # main checking loop
         while True:
-
-            # obtain new hooks from queue
-            while True:
-                try:
-                    callback = callbacks_in_queue.get_nowait()
-                    callbacks_to_check.append(callback)
-                except Queue.Empty:
-                    break
 
             nodes = self.list_nodes_nebula()
             nodes_info_lock.acquire()
             NODES_INFO = nodes
             nodes_info_lock.release()
-
-            newcallbacks = []
-            for callback in callbacks_to_check:
-                should_notify = callback.check_changes(nebuladict=nodes)
-                if should_notify:
-                    if callback.notifycondition:
-                        resend_notify_signal.append(callback.notifycondition)
-
-                if not callback.finished:
-                    newcallbacks.append(callback)
-
-            callbacks_to_check = newcallbacks
+            with CALLBACKCHECK_CONDITON:
+                CALLBACKCHECK_CONDITON.notifyAll()
 
             time.sleep(1)
-
-            while True:
-                try:
-                    condition = resend_notify_signal.pop()
-                    with condition:
-                        condition.notifyAll()
-                except IndexError:
-                    break
 
             nets = self.list_nebulanets_xml()
             nets_info_lock.acquire()
@@ -211,7 +185,7 @@ class InfoPoller(threading.Thread):
                         v['HISTORY_RECORDS'] = [v['HISTORY_RECORDS']]
 
                 vms[nid] = val
-        except RuntimeError as e:
+        except ExternalCMDError as e:
             debug_log_print(e)
             return {}
         return vms
@@ -282,8 +256,46 @@ class CallbackChecker(threading.Thread):
         callbacks_to_check = []
         resend_notify_signal = []
 
-        while True:
-            pass
+        nodes = list_nodes_nebula()
+
+        with CALLBACKCHECK_CONDITON:
+            while True:
+                # obtain new hooks from queue
+                while True:
+                    try:
+                        callback = callbacks_in_queue.get_nowait()
+                        callbacks_to_check.append(callback)
+                    except Queue.Empty:
+                        break
+
+                newcallbacks = []
+                for callback in callbacks_to_check:
+                    should_notify = callback.check_changes(nebuladict=nodes)
+                    if should_notify:
+                        if callback.notifycondition:
+                            resend_notify_signal.append(callback.notifycondition)
+
+                    if not callback.finished:
+                        newcallbacks.append(callback)
+
+                callbacks_to_check = newcallbacks
+
+                ## wait for signal to check
+                # debug_log_print("zzzzzzz...")
+                CALLBACKCHECK_CONDITON.wait()
+                nodes = list_nodes_nebula()
+
+                while True:
+                    try:
+                        condition = resend_notify_signal.pop()
+                        with condition:
+                            condition.notifyAll()
+                    except IndexError:
+                        break
+
+
+
+
 
 
 class MacAddress(object):
@@ -2421,7 +2433,7 @@ def api_node_delete(nodeid):
 def api_node_create():
     status = "success"
     answ = {"data": {}}
-    # debug_log_print(request.data)
+    debug_log_print("Create node",request.data)
 
     try:
         reqdata = json.loads(request.data)
@@ -2661,6 +2673,11 @@ if __name__ == '__main__':
     debug_log_print("start poller")
     poller.start()
     debug_log_print("started poller")
+
+    checker = CallbackChecker()
+    checker.setDaemon(daemonic=True)
+    checker.start()
+
     time.sleep(1)
     tdata.DB_CON = open_db2()
     with tdata.DB_CON:
