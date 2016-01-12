@@ -234,7 +234,7 @@ class InfoPoller(threading.Thread):
         return vnets
 
 
-class CallbackSender(threading.Thread):
+class CallbackDispatcher(threading.Thread):
     def run(self):
 
         while True:
@@ -548,8 +548,9 @@ def check_user_privilege_node(nodeid, username=None):
             return True
         username = tdata.username
     tags = get_tags_node(nodeid)
-    usertag = "owner:{0]".format(username)
+    usertag = "owner:{0}".format(username)
     if usertag not in tags:
+        tdata.extended_error_log += str(filter(lambda a: a.startswith("owner:"), tags))
         raise PrivilegeException("{0} is not owner of this node".format(username))
 
 
@@ -559,7 +560,7 @@ def check_user_privilege_net(netid, username=None):
             return True
         username = tdata.username
     tags = get_tags_net(netid)
-    usertag = "owner:{0]".format(username)
+    usertag = "owner:{0}".format(username)
     if usertag not in tags:
         raise PrivilegeException("{0} is not owner of this net".format(username))
 
@@ -679,6 +680,8 @@ def get_nodes_db_for_output(tags=None, nodeids=None):
             node["cpu"] = internalvalue.get("TEMPLATE").get("CPU")
 
             node["memory"] = internalvalue.get("MEMORY")
+
+            del node["creationtemplate"]
 
         else:
             #OpenStack
@@ -958,9 +961,9 @@ def add_node_db(node_d):
     with db_con.cursor() as db_cur:
         node_tuple = (
             node_d.get("name", None), node_d.get("internal_id", None), datetime.utcnow(),
-            node_d["platform"] )
+            node_d["platform"], node_d.get("creationtemplate") )
         db_cur.execute(
-            "INSERT into nodes (name, internal_id, lastchange, platform) VALUES ( %s, %s, %s, %s) RETURNING id;",
+            "INSERT into nodes (name, internal_id, lastchange, platform, creationtemplate) VALUES ( %s, %s, %s, %s, %s) RETURNING id;",
             node_tuple)
         try:
             nodeid = db_cur.fetchone()[0]
@@ -2189,7 +2192,7 @@ def api_tags_add():
     return make_response(jsonify(answ))
 
 
-@app.route('/api/v1.0/images', methods=['GET'])
+@app.route('/api/v1.0/nebulaimages', methods=['GET'])
 @auth.login_required
 def api_images_list():
     status = "success"
@@ -2259,7 +2262,8 @@ def api_templates_add():
     return make_response(jsonify(answ))
 
 
-@app.route('/api/v1.0/templates/<selector>', methods=['GET'])
+@app.route('/api/v1.0/templates/<selector>',\
+           methods=['GET'])
 @auth.login_required
 def api_template_get(selector):
     status = "success"
@@ -2297,7 +2301,7 @@ def api_nodes_list():
 
     try:
         data = get_nodes_db_for_output()
-        answ["data"]["nodes"] = data
+        answ["data"]["nodes"] = data.values()
     except BaseException as e:
         status = "error"
         answ["message"] = repr(e)
@@ -2320,12 +2324,12 @@ def api_node_get(nodeid):
         status = "fail"
         debug_log_print(e)
         answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + "you are neither owner nor admin"
+        answ["data"]["description"] = tdata.extended_error_log + " you are neither owner nor admin of this node"
     except NoSuchObjectException as e:
         status = "fail"
         debug_log_print(e)
         answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + "no such node id exists"
+        answ["data"]["description"] = tdata.extended_error_log + " no such node id exists"
     except BaseException as e:
         status = "error"
         debug_log_print(e)
@@ -2349,12 +2353,12 @@ def api_node_get_status(nodeid):
         status = "fail"
         debug_log_print(e)
         answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + "; you are neither owner nor admin"
+        answ["data"]["description"] = tdata.extended_error_log + "you are neither owner nor admin of this node"
     except NoSuchObjectException as e:
         status = "fail"
         debug_log_print(e)
         answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + "; no such node id exists"
+        answ["data"]["description"] = tdata.extended_error_log + "no such node id exists"
     except BaseException as e:
         status = "error"
         debug_log_print(e)
@@ -2377,7 +2381,7 @@ def api_node_get_vncinfo(nodeid):
             raise NoSuchObjectException("underlying nebula node probably doesn't exist ")
         if get_node_state(nodeid, selector="lcm_state") != "RUNNING":
             raise WrongStateForActionException("that node isn't running")
-        internal = nodeinfo["internal_info"]
+        internal = info_node_nebula(nodeinfo["internal_id"])
         info = {"host": internal["HISTORY_RECORDS"]["HISTORY"]["HOSTNAME"],
                 "port": internal["TEMPLATE"]["GRAPHICS"]["PORT"],
                 "password": internal["TEMPLATE"]["GRAPHICS"]["PASSWD"]}
@@ -2387,12 +2391,12 @@ def api_node_get_vncinfo(nodeid):
         status = "fail"
         debug_log_print(e)
         answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + "; you are neither owner nor admin"
+        answ["data"]["description"] = tdata.extended_error_log + "you are neither owner nor admin of this node"
     except NoSuchObjectException as e:
         status = "fail"
         debug_log_print(e)
         answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + "; no such node id exists"
+        answ["data"]["description"] = tdata.extended_error_log + "no such node id exists"
     except BaseException as e:
         status = "error"
         debug_log_print(e)
@@ -2439,7 +2443,7 @@ def api_node_create():
         reqdata = json.loads(request.data)
         templname = reqdata.pop("templatename")
         dbid = create_node(templname, **reqdata)
-        answ["data"]["node"] = {dbid: get_node_db_for_output(dbid)}
+        answ["data"]["node"] = get_node_db_for_output(dbid)
     except GeneralAPIError as e:
         status = "fail"
         answ["message"] = repr(e)
@@ -2462,7 +2466,7 @@ def api_nets_list():
 
     try:
         data = get_networks_db_for_output()
-        answ["data"]["nets"] = data
+        answ["data"]["nets"] = data.values()
     except BaseException as e:
         status = "error"
         answ["message"] = repr(e)
@@ -2480,7 +2484,7 @@ def api_net_delete(netid):
     answ = {"data": {}}
     try:
         remove_network(netid)
-        answ["data"]["deleted"] = True
+        answ["data"]["deleted"] = netid
     except GeneralAPIError as e:
         status = "fail"
         answ["message"] = repr(e)
@@ -2511,7 +2515,7 @@ def api_net_create_link():
 
         data = connect_nodes_nebula(n1, n2, **reqdata)
 
-        answ["data"]["deleted"] = data
+        answ["data"]["connection"] = data
     except GeneralAPIError as e:
         status = "fail"
         answ["message"] = repr(e)
@@ -2537,7 +2541,7 @@ def api_net_get(netid):
     except PrivilegeException as e:
         status = "fail"
         answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + "you are neither owner nor admin"
+        answ["data"]["description"] = tdata.extended_error_log + " you are neither owner nor admin"
     except NoSuchObjectException as e:
         status = "fail"
         answ["message"] = repr(e)
@@ -2561,11 +2565,11 @@ def api_net_interfaces_get(netid):
     try:
         check_user_privilege_net(netid)
         data = get_interfaces_db(netid=netid)
-        answ["data"]["interfaces"] = data
+        answ["data"]["interfaces"] = data.values()
     except PrivilegeException as e:
         status = "fail"
         answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + "you are neither owner nor admin"
+        answ["data"]["description"] = tdata.extended_error_log + " you are neither owner nor admin"
     except NoSuchObjectException as e:
         status = "fail"
         answ["message"] = repr(e)
@@ -2587,15 +2591,14 @@ def api_node_interfaces_get(nodeid):
     status = "success"
     answ = {"data": {}}
     try:
-        # jen kvuli privilege checku
-        get_node_db(nodeid)
+        check_user_privilege_node(nodeid)
 
         data = get_interfaces_db(nodeid=nodeid)
-        answ["data"]["interfaces"] = data
+        answ["data"]["interfaces"] = data.values()
     except PrivilegeException as e:
         status = "fail"
         answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + "you are neither owner nor admin"
+        answ["data"]["description"] = tdata.extended_error_log + " you are neither owner nor admin"
     except NoSuchObjectException as e:
         status = "fail"
         answ["message"] = repr(e)
@@ -2622,7 +2625,7 @@ def api_interface_get(intfid):
     except PrivilegeException as e:
         status = "fail"
         answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + "you are neither owner nor admin"
+        answ["data"]["description"] = tdata.extended_error_log + " you are neither owner nor admin"
     except NoSuchObjectException as e:
         status = "fail"
         answ["message"] = repr(e)
@@ -2651,7 +2654,7 @@ def api_interface_delete(intfid):
     except PrivilegeException as e:
         status = "fail"
         answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + "you are neither owner nor admin"
+        answ["data"]["description"] = tdata.extended_error_log + " you are neither owner nor admin"
     except NoSuchObjectException as e:
         status = "fail"
         answ["message"] = repr(e)
@@ -2684,7 +2687,7 @@ if __name__ == '__main__':
 
         if len(sys.argv) >= 2 and sys.argv[1] == "server":
 
-            callbackdispatcher = CallbackSender()
+            callbackdispatcher = CallbackDispatcher()
             callbackdispatcher.setDaemon(daemonic=True)
             debug_log_print("start callback dispatcher")
             callbackdispatcher.start()
@@ -2765,7 +2768,7 @@ CONTEXT=[DUMMY="dummy"]
             #
             # debug_print(get_node_db_and_internal(2))
             #
-
+            # add_user("user", "user", isadmin=False)
 
             # debug_log_print("Nodes DB:", get_nodes_db(tags=["LMN","user:jirka"]))
 
