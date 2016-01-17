@@ -25,13 +25,17 @@ import requests
 import hashlib
 import binascii
 import logging
+import Queue
+
 
 from cloud_api_settings import *
 from cloud_api_nebulaconstants import *
+from datetime import datetime, timedelta
+
+
 
 logging.basicConfig(filename=LOGGING_PATH, level=LOGLEVEL)
 
-from datetime import datetime, timedelta
 
 
 def totimestamp(dt, epoch=datetime(1970, 1, 1)):
@@ -40,10 +44,10 @@ def totimestamp(dt, epoch=datetime(1970, 1, 1)):
     return (td.microseconds + (td.seconds + td.days * 86400) * 10 ** 6) / 10 ** 6
 
 
-import Queue
 
 tdata = threading.local()  # thread local data - mainly for username
-tdata.extended_error_log = ""
+tdata.extended_error_log = []
+tdata.user_info = []
 tdata.DB_CON = None
 
 
@@ -99,9 +103,16 @@ def debug_log_print_ext(*args):
         topr = now + ":\n"
     topr += "\n".join(map(modified_pformat, args))
     logging.debug(topr)
-    tdata.extended_error_log = "\n".join((tdata.extended_error_log, topr))
+    tdata.extended_error_log.append(topr)
     if DEBUG_PRINTS:
         print topr
+
+def add_to_user_problem_msg(*msgs):
+    for msg in msgs:
+        tdata.user_info.append(msg)
+
+def get_user_problem_msg():
+    return "\n".join(tdata.user_info)
 
 
 callback_send_queue = Queue.Queue()
@@ -121,7 +132,6 @@ nets_info_lock.acquire()
 CALLBACKCHECK_CONDITON = threading.Condition()
 
 
-
 class InfoPoller(threading.Thread):
     def run(self):
 
@@ -138,7 +148,6 @@ class InfoPoller(threading.Thread):
 
         # main checking loop
         while True:
-
             nodes = self.list_nodes_nebula()
             nodes_info_lock.acquire()
             NODES_INFO = nodes
@@ -249,7 +258,6 @@ class CallbackDispatcher(threading.Thread):
             callback_send_queue.task_done()
 
 
-
 class CallbackChecker(threading.Thread):
     def run(self):
 
@@ -294,14 +302,9 @@ class CallbackChecker(threading.Thread):
                         break
 
 
-
-
-
-
 class MacAddress(object):
     def __init__(self, macplainstr):
         self.nummeric = int(macplainstr, 16)
-
 
     def __str__(self):
         plainstr = '%012x' % self.nummeric
@@ -315,7 +318,6 @@ class MacAddress(object):
 
     def __repr__(self):
         return self.__str__()
-
 
     @classmethod
     def from_parts(cls, macprefix=None, macsuffix=None, delim=":"):
@@ -398,6 +400,12 @@ class WrongStateForActionException(GeneralAPIError):
 
 # for waiting for event to give up after certain time
 def try_more_time(start_time, max_time):
+    """
+
+    :param start_time:
+    :param max_time:
+    :return:
+    """
     if max_time == 0:
         return True
 
@@ -431,7 +439,7 @@ class NotifyTask(object):
             allnodes = get_nodes_db()
             for nid in node_ids:
                 if nid not in allnodes:
-                    debug_log_print_ext("notifytask: Entered Id doesn't belong to any id")
+                    debug_log_print("notifytask: Entered Id doesn't belong to any id")
                     continue
                 try:
                     if allnodes[nid]["platform"] == "nebula" and allnodes[nid]["internal_id"]:
@@ -440,7 +448,7 @@ class NotifyTask(object):
                     else:  # TODO OpenStack
                         pass
                 except Exception as e:
-                    debug_log_print_ext("NotifyTask: get internal id error: " + e)
+                    debug_log_print("NotifyTask: get internal id error: " + e)
 
         if (not self.nebulaidstocheck and not self.openstackidstocheck) or (
                     not notifycondition and not notifyaddr) or not self.change_selector:
@@ -455,13 +463,17 @@ class NotifyTask(object):
             if self.nebulaidstocheck:
                 self.previous_nebula = {}
 
-
     """
         checks if there are matching changes and possibly notifies about it
         :returns True to signal that it's to safe discard this check, False otherwise
     """
 
     def check_nebulanodes_changes(self, current_nebuladict):
+        """
+
+        :param current_nebuladict:
+        :return:
+        """
         changes_n = {}
         if self.finished:
             if self.notifycondition:
@@ -543,6 +555,15 @@ class NotifyTask(object):
 #     return testfunction
 
 def check_user_privilege_node(nodeid, username=None):
+    """
+
+    :param nodeid:
+    :type nodeid:
+    :param username:
+    :type username:
+    :return:
+    :rtype:
+    """
     if not username:
         if tdata.isadmin:
             return True
@@ -550,11 +571,21 @@ def check_user_privilege_node(nodeid, username=None):
     tags = get_tags_node(nodeid)
     usertag = "owner:{0}".format(username)
     if usertag not in tags:
-        tdata.extended_error_log += str(filter(lambda a: a.startswith("owner:"), tags))
+        add_to_user_problem_msg("you are neither admin, nor owner of this node")
+        add_to_user_problem_msg("Legitimate users:", str(filter(lambda a: a.startswith("owner:"), tags)))
         raise PrivilegeException("{0} is not owner of this node".format(username))
 
 
 def check_user_privilege_net(netid, username=None):
+    """
+
+    :param netid:
+    :type netid:
+    :param username:
+    :type username:
+    :return:
+    :rtype:
+    """
     if not username:
         if tdata.isadmin:
             return True
@@ -562,10 +593,19 @@ def check_user_privilege_net(netid, username=None):
     tags = get_tags_net(netid)
     usertag = "owner:{0}".format(username)
     if usertag not in tags:
+        add_to_user_problem_msg("you are neither admin, nor owner of this net")
+        add_to_user_problem_msg("Legitimate users:", str(filter(lambda a: a.startswith("owner:"), tags)))
         raise PrivilegeException("{0} is not owner of this net".format(username))
 
 
 def run_cmd(cmd):
+    """
+
+    :param cmd:
+    :type cmd:
+    :return:
+    :rtype:
+    """
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
     stdout, stderr = process.communicate()
 
@@ -602,7 +642,7 @@ def get_accessible_intf(nodeid):
 
 
 def open_db2():
-    debug_log_print("trying to connect database: ", ( DATABASE, DBUSER))
+    debug_log_print("trying to connect database: ", (DATABASE, DBUSER))
     try:
         db_con = psycopg2.connect(database=DATABASE, user=DBUSER)
         db_con.autocommit = True
@@ -644,8 +684,6 @@ def get_network_db_for_output(netid):
     return net_d
 
 
-
-
 def get_nodes_db_and_internal(tags=None, nodeids=None):
     nodes_d = get_nodes_db(tags, nodeids)
 
@@ -660,10 +698,11 @@ def get_nodes_db_and_internal(tags=None, nodeids=None):
             node["state"] = NUM2VMSTATE.get(nebulanodes.get(internalid, {}).get("STATE"), "UNKNOWN")
 
         else:
-            #OpenStack
+            # OpenStack
             pass
 
     return nodes_d
+
 
 def get_nodes_db_for_output(tags=None, nodeids=None):
     nodes_d = get_nodes_db(tags, nodeids)
@@ -684,7 +723,7 @@ def get_nodes_db_for_output(tags=None, nodeids=None):
             del node["creationtemplate"]
 
         else:
-            #OpenStack
+            # OpenStack
             pass
 
     return nodes_d
@@ -781,6 +820,7 @@ def get_networks_db_and_internal(tags=None, typeselect=None):
         return out_d
     return nets_d
 
+
 def get_networks_db_for_output(tags=None, typeselect=None):
     nets_d = get_networks_db(tags)
 
@@ -800,7 +840,6 @@ def get_networks_db_for_output(tags=None, typeselect=None):
     if typeselect:
         return out_d
     return nets_d
-
 
 
 def get_used_vxids_db():
@@ -961,10 +1000,10 @@ def add_node_db(node_d):
     with db_con.cursor() as db_cur:
         node_tuple = (
             node_d.get("name", None), node_d.get("internal_id", None), datetime.utcnow(),
-            node_d["platform"], node_d.get("creationtemplate") )
+            node_d["platform"], node_d.get("creationtemplate"))
         db_cur.execute(
-            "INSERT into nodes (name, internal_id, lastchange, platform, creationtemplate) VALUES ( %s, %s, %s, %s, %s) RETURNING id;",
-            node_tuple)
+                "INSERT into nodes (name, internal_id, lastchange, platform, creationtemplate) VALUES ( %s, %s, %s, %s, %s) RETURNING id;",
+                node_tuple)
         try:
             nodeid = db_cur.fetchone()[0]
         except psycopg2.IntegrityError:
@@ -975,15 +1014,15 @@ def add_node_db(node_d):
 
 
 def add_interface_db(info_d, netid):
-    #info_d  je node_d ale s pridanymi parametry
+    # info_d  je node_d ale s pridanymi parametry
     db_con = tdata.DB_CON
     with db_con.cursor() as db_cur:
-        intf_tuple = (info_d["id"], info_d.get("mac_addr"), info_d.get("ip", None), netid, info_d.get("shaping", "") )
+        intf_tuple = (info_d["id"], info_d.get("mac_addr"), info_d.get("ip", None), netid, info_d.get("shaping", ""))
         isok = True
         try:
             db_cur.execute(
-                "INSERT into interfaces (node_id, mac_addr, ip_addr, net_id, shaping) VALUES (%s, %s, %s, %s, %s) RETURNING id;",
-                intf_tuple)
+                    "INSERT into interfaces (node_id, mac_addr, ip_addr, net_id, shaping) VALUES (%s, %s, %s, %s, %s) RETURNING id;",
+                    intf_tuple)
             dbid = db_cur.fetchone()[0]
         except psycopg2.IntegrityError as e:
             debug_log("nebula_attach_node_to_net - INSERT" + str(intf_tuple))
@@ -1035,8 +1074,8 @@ def add_network_db(net_d, type="pt2pt", size=2):
         #     debug_log_print(startmac, startmac.nummeric, str(startmac))
         #     debug_log_print(net_tuple+[startmac])
         db_cur.execute(
-            "INSERT into networks (nebulaid,size,vid,type,reservedsince) VALUES (%s, %s, %s, %s, %s) RETURNING id;",
-            net_tuple)
+                "INSERT into networks (nebulaid,size,vid,type,reservedsince) VALUES (%s, %s, %s, %s, %s) RETURNING id;",
+                net_tuple)
         # else:
         #     db_cur.execute("INSERT into networks (nebulaid,size,used,vid,type,shaping,reservedsince) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id;" ,net_tuple)
         netid = db_cur.fetchone()[0]
@@ -1055,12 +1094,12 @@ def add_nodetemplate_db(templstring, name, defaultvalues=None, defaultuse=False,
     with db_con.cursor() as db_cur:
         try:
             db_cur.execute(
-                "INSERT into templates (name,template,defaultvalues,defaultuse,userid,platform) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id;",
-                (name, templstring, defaultvalues, defaultuse, userid, platform))
+                    "INSERT into templates (name,template,defaultvalues,defaultuse,userid,platform) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id;",
+                    (name, templstring, defaultvalues, defaultuse, userid, platform))
             dbid = db_cur.fetchone()[0]
         except psycopg2.IntegrityError  as e:
-            debug_log_print_ext("template with name %s already exists" % (name,), e)
-            raise DuplicateNameException("template with name %s already exists" % (name,))
+            add_to_user_problem_msg("template with name {0:s} already exists".format(name))
+            raise DuplicateNameException("template with name {0:s} already exists".format(name))
     return dbid
 
 
@@ -1070,6 +1109,7 @@ def create_tag(tagname):
         try:
             db_cur.execute("INSERT into tagwords (tag) VALUES (%s) ;", (tagname,))
         except psycopg2.IntegrityError:
+            # add_to_user_problem_msg("tag with name {0:s} already exists".format(tagname))
             raise DuplicateNameException("tag with name {0} already exists".format(tagname))
 
 
@@ -1082,18 +1122,23 @@ def add_tag_node(tags, node):
         for tag in tags:
             try:
                 db_cur.execute(
-                    "INSERT into node_taggings (node_id, tag_id) VALUES (%s, (SELECT id from tagwords WHERE tag =%s)) ;",
-                    (node, tag))
+                        "INSERT into node_taggings (node_id, tag_id) VALUES (%s, (SELECT id from tagwords WHERE tag =%s)) ;",
+                        (node, tag))
             except psycopg2.IntegrityError as e:
                 if "violates foreign key constraint" in e:
-                    debug_log_print("such node id doesn't exist")
+                    add_to_user_problem_msg("such node id doesn't exist")
                     raise NoSuchObjectException("such node id doesn't exist")
                 elif 'null value in column "tag_id" violates not-null constraint' in e:
-                    debug_log_print("such tag doesn't exist")
-                    raise DuplicateNameException("such tag doesn't exist")
+                    add_to_user_problem_msg("such tag doesn't exist")
+                    raise NoSuchObjectException("such tag doesn't exist")
+                elif 'violates unique constraint "node_taggings_pkey"':
+                    add_to_user_problem_msg("tag {0} already added".format(tag))
                 else:
-                    debug_log_print("add node integrity error: %s" % (e,))
-                    raise GeneralAPIError("add node integrity error: %s" % (e,))
+                    raise
+
+
+
+
 
 
 def remove_tag_node(tags, node):
@@ -1105,18 +1150,16 @@ def remove_tag_node(tags, node):
         for tag in tags:
             try:
                 db_cur.execute(
-                    "INSERT into node_taggings (node_id, tag_id) VALUES (%s, (SELECT id from tagwords WHERE tag =%s)) ;",
-                    (node, tag))
+                        "DELETE from node_taggings where node_id=%s and tag_id=(SELECT id from tagwords WHERE tag=%s);",
+                        (node, tag))
             except psycopg2.IntegrityError as e:
                 if "violates foreign key constraint" in e:
-                    debug_log_print("such node id doesn't exist")
+                    add_to_user_problem_msg("such node id doesn't exist")
                     raise NoSuchObjectException("such node id doesn't exist")
                 elif 'null value in column "tag_id" violates not-null constraint' in e:
-                    debug_log_print("such tag doesn't exist")
-                    raise DuplicateNameException("such tag doesn't exist")
-                else:
-                    debug_log_print("add node integrity error: %s" % (e,))
-                    raise GeneralAPIError("add node integrity error: %s" % (e,))
+                    add_to_user_problem_msg("such tag doesn't exist")
+                    raise NoSuchObjectException("such tag doesn't exist")
+                raise
 
 
 def add_tag_network(tags, net):
@@ -1128,8 +1171,8 @@ def add_tag_network(tags, net):
         for tag in tags:
             try:
                 db_cur.execute(
-                    "INSERT into net_taggings (net_id, tag_id) VALUES (%s, (SELECT id FROM tagwords WHERE tag=%s)) ;",
-                    (net, tag))
+                        "INSERT into net_taggings (net_id, tag_id) VALUES (%s, (SELECT id FROM tagwords WHERE tag=%s)) ;",
+                        (net, tag))
             except psycopg2.IntegrityError as e:
                 if "violates foreign key constraint" in e:
                     debug_log_print("such net id doesn't exist")
@@ -1155,8 +1198,9 @@ def add_user(username, password, isadmin=False, nebulauser=None):
     db_con = tdata.DB_CON
     with db_con.cursor() as db_cur:
         try:
-            db_cur.execute("INSERT into users (name, password, salt, isadmin, nebulauser) VALUES (%s, %s, %s, %s, %s) ;",
-                           inserttuple)
+            db_cur.execute(
+                "INSERT into users (name, password, salt, isadmin, nebulauser) VALUES (%s, %s, %s, %s, %s) ;",
+                inserttuple)
         except psycopg2.IntegrityError as e:
             debug_log_print_ext("user couldn't be added, probably duplicate;\n %s" % (e,))
             raise GeneralAPIError("user couldn't be added, probably duplicate")
@@ -1183,10 +1227,19 @@ def get_tags():
 
 
 def get_tags_node(nodeid):
+    """
+
+    :param nodeid:
+    :type nodeid:
+    :return:
+    :rtype: list
+    """
     db_con = tdata.DB_CON
     with db_con.cursor() as db_cur:
         db_cur.execute("SELECT tag FROM node_taggings, tagwords WHERE node_id=%s and tag_id=id ;", (nodeid,))
         tags = db_cur.fetchall()
+    if not tags:
+        raise NoSuchObjectException("such node id doesn't exist")
     tags = map(lambda a: a[0], tags)
     return tags
 
@@ -1308,7 +1361,7 @@ def remove_network(netid):
         finally:
             results.append(result)
 
-    if all(results):  #everything successful
+    if all(results):  # everything successful
         delete_net_db(netid)
     else:
         raise GeneralAPIError("removing network {0} wasn't successful,\
@@ -1331,7 +1384,7 @@ def create_vxlan_nebulanet_ether(mac, size, addars=None, nettype="pt2pt"):
 
     vxid = 0
     while True:
-        #TODO potentially infinite loop, all may be used up
+        # TODO potentially infinite loop, all may be used up
         vxid = random.randint(VXIDSTART, VXIDEND)
         if vxid not in used_vlanids:
             break
@@ -1378,12 +1431,12 @@ def create_link(mac1, mac2=None):
     with open(TEMPLATE_PATH + LINK_TEMPLATE_FILE, "r") as nt:
         nettemplate = string.Template(nt.read())
 
-    #used_vlanids = map(lambda a: a.get('bridge').replace("onebr0-vlan",""),list_nebulanets())
+    # used_vlanids = map(lambda a: a.get('bridge').replace("onebr0-vlan",""),list_nebulanets())
     used_vlanids = nebulaid_to_vxlanid_mapping().values()
 
     vxid = 0
     while True:
-        #TODO potentially infinite loop, all may be used
+        # TODO potentially infinite loop, all may be used
         vxid = random.randint(VXIDSTART, VXIDEND)
         if vxid not in used_vlanids:
             break
@@ -1435,7 +1488,7 @@ def create_flat_nebulanet(size=254, startmac=None, startip=None, vxlan=False, ne
         used_vlanids = nebulaid_to_vxlanid_mapping().values()
 
         while True:
-            #TODO potentially infinite loop, all may be used
+            # TODO potentially infinite loop, all may be used
             vxid = random.randint(VXIDSTART, VXIDEND)
             if vxid not in used_vlanids:
                 break
@@ -1447,7 +1500,7 @@ def create_flat_nebulanet(size=254, startmac=None, startip=None, vxlan=False, ne
         with open(TEMPLATE_PATH + PLAIN_FLAT_TEMPLATE_FILE, "r") as nt:
             nettemplate = string.Template(nt.read())
 
-    #get name:
+    # get name:
     usednames = map(lambda a: a["NAME"], list_nebulanets_xml().itervalues())
     while True:
         namenum = random.randint(0, 1000)
@@ -1508,7 +1561,7 @@ def attach_node_to_net(node_d, netid):
     return result
 
 
-#TODO FIX!
+# TODO FIX!
 def nebula_attach_node_to_net(node_d, netid):
     net_d = get_network_db(netid)
     if not net_d["nebulaid"]:
@@ -1523,7 +1576,7 @@ def nebula_attach_node_to_net(node_d, netid):
     out, stderr = run_cmd("onevm nic-attach {0}  --network {1}".format(intid, nebulanetid))
     debug_log_print("onevm nic-attach {0}  --network {1}".format(intid, nebulanetid))
 
-    if out:  #pri uspechu se nepise nic, jinak ano
+    if out:  # pri uspechu se nepise nic, jinak ano
         debug_log(out)
         raise GeneralAPIError(out)
     # increase_net_use_db(netid,howmuch=1)
@@ -1549,7 +1602,7 @@ def nebula_attach_node_to_net(node_d, netid):
     return dbid
 
 
-#TODO implement maxtime check
+# TODO implement maxtime check
 def change_node_state(nodeid, whattodo, waitforit=True):
     OPTIONS = ["hold", "shutdown", "stop", "resume"]
     VM_STATE = ["INIT", "PENDING", "HOLD", "ACTIVE", "STOPPED", "SUSPENDED", "DONE", "FAILED", "POWEROFF", "UNDEPLOYED"]
@@ -1614,13 +1667,13 @@ def change_node_state(nodeid, whattodo, waitforit=True):
                 states_d["vm_state"], states_d["lcm_state"]))
 
 
-    else:  #OpenStack
+    else:  # OpenStack
         pass
 
     return True
 
 
-#TODO implement maxtime check
+# TODO implement maxtime check
 def change_node_state_cruder(nodeid, desiredstate, waitforit=True):
     OPTIONS = ["hold", "shutdown", "stop", "resume"]
     VM_STATE = ["INIT", "PENDING", "HOLD", "ACTIVE", "STOPPED", "SUSPENDED", "DONE", "FAILED", "POWEROFF", "UNDEPLOYED"]
@@ -1641,7 +1694,7 @@ def change_node_state_cruder(nodeid, desiredstate, waitforit=True):
 
     if desiredstate not in neededstate2action:
         raise WrongRequestException(
-            "there is no such state possible, choose one of {0}".format(neededstate2action.keys()))
+                "there is no such state possible, choose one of {0}".format(neededstate2action.keys()))
 
     node_d = get_node_db(nodeid)
 
@@ -1679,14 +1732,16 @@ def change_node_state_cruder(nodeid, desiredstate, waitforit=True):
                  {2}".format(desiredstate, states_d["vm_state"], states_d["lcm_state"]))
         else:
             debug_log_print(
-                "in vm state: {0:s} , lcm state {1:s} is not possible to change state".format(states_d["vm_state"],
-                                                                                              states_d["lcm_state"]))
+                    "in vm state: {0:s} , lcm state {1:s} is not possible to change state".format(states_d["vm_state"],
+                                                                                                  states_d[
+                                                                                                      "lcm_state"]))
             raise GeneralAPIError(
-                "in vm state: {0:s} , lcm state {1:s} is not possible to change state".format(states_d["vm_state"],
-                                                                                              states_d["lcm_state"]))
+                    "in vm state: {0:s} , lcm state {1:s} is not possible to change state".format(states_d["vm_state"],
+                                                                                                  states_d[
+                                                                                                      "lcm_state"]))
 
 
-    else:  #OpenStack
+    else:  # OpenStack
         pass
 
     return True
@@ -1750,7 +1805,7 @@ def create_node(templatename, **kwargs):
 
 
 def create_node_nebula(templateid, nics=None, tags=None, **kwargs):
-    #TODO nics
+    # TODO nics
 
     ownertag = tdata.ownertag
     if not tags:
@@ -1881,11 +1936,13 @@ def remove_addrarr_nebulanet(netid, startmac):
     arpool = net_d.get("internal_info", {}).get("AR_POOL")
     if not arpool:
         debug_log_print_ext(
-            "underlying nebulanetwork isn't available or has no Address Ranges; netid: {0}, startmac: {1}".format(netid,
-                                                                                                                  startmac))
+                "underlying nebulanetwork isn't available or has no Address Ranges; netid: {0}, startmac: {1}".format(
+                    netid,
+                    startmac))
         raise NoSuchObjectException(
-            "underlying nebulanetwork isn't available or has no Address Ranges; netid: {0}, startmac: {1}".format(netid,
-                                                                                                                  startmac))
+                "underlying nebulanetwork isn't available or has no Address Ranges; netid: {0}, startmac: {1}".format(
+                    netid,
+                    startmac))
 
     for addrrange in arpool:
         ar_id = addrrange["AR_ID"]
@@ -1897,7 +1954,7 @@ def remove_addrarr_nebulanet(netid, startmac):
     if mac != startmac:
         debug_log_print_ext("there is no Address Range in netid: {0} with startmac: {1}".format(netid, startmac))
         raise NoSuchObjectException(
-            "there is no Address Range in netid: {0} with startmac: {1}".format(netid, startmac))
+                "there is no Address Range in netid: {0} with startmac: {1}".format(netid, startmac))
 
     for i in range(4):
         out, stderr = run_cmd("onevnet rmar {0} {1}".format(net_d["nebulaid"], ar_id))
@@ -1955,7 +2012,7 @@ def recursive_element_list(elem):
         subs_d = {}
         for k, v in subs:
 
-            #v xml je v jedne urovni vice elementu se stejnym jmenem
+            # v xml je v jedne urovni vice elementu se stejnym jmenem
             if tkeys.count(k) > 1:
                 arr = subs_d.get(k, [])
                 arr.append(v)
@@ -2030,8 +2087,8 @@ def check_state_nebula(nebulaid, vmstate=None, lcmstate=None, tries=1):
 
             if tries == 1:
                 debug_log_print_ext(
-                    "attempted action isn't possible due to node being in wrong state (current: {0} ; needed: {1}".format(
-                        (realvmstate, reallcmstate), (vmstate, lcmstate)))
+                        "attempted action isn't possible due to node being in wrong state (current: {0} ; needed: {1}".format(
+                                (realvmstate, reallcmstate), (vmstate, lcmstate)))
                 raise WrongStateForActionException("attempted action isn't possible due to node being in wrong state")
             tries -= 1
 
@@ -2049,7 +2106,7 @@ def get_node_state(nodeid, selector=None):
         value = get_node_state_nebula(db_node_info["internal_id"])
 
     else:
-        #OpenStack
+        # OpenStack
         pass
 
     if selector:
@@ -2063,7 +2120,7 @@ def list_nebula_images():
         out, stderr = run_cmd_e("oneimage list -x")
         tree = ET.fromstring(out)
 
-        #root = tree.getroot()
+        # root = tree.getroot()
         imgs = {}
         for img in tree:
             k, v = recursive_element_list(img)
@@ -2074,600 +2131,6 @@ def list_nebula_images():
         return {}
     return imgs
 
-
-from flask import Flask, url_for, jsonify, make_response, request
-from flask.ext.httpauth import HTTPBasicAuth
-
-auth = HTTPBasicAuth()
-
-app = Flask(__name__)
-
-
-@app.errorhandler(404)
-def not_found(error):
-    return make_response(jsonify({"status": "fail", 'message': 'Not found (no handler for this path/action)'}), 404)
-
-
-@auth.verify_password
-def verify_password(username, password):
-    tdata.DB_CON = open_db2()
-    with tdata.DB_CON:
-        res_d = get_user(username)
-        if not res_d:
-            return False
-
-        tdata.username = username
-        tdata.isadmin = res_d["isadmin"]
-        tdata.userid = res_d["id"]
-        tdata.extended_error_log = ""
-        tdata.ownertag = "owner:{0}".format(username)
-
-        # derivedkey = hashlib.pbkdf2_hmac('sha256', password, res_d["salt"], 100000)
-        # hexalified = binascii.hexlify(derivedkey)
-        hexalified = hashlib.sha512(password + res_d["salt"]).hexdigest()
-
-    return res_d["password"] == hexalified
-
-
-@auth.error_handler
-def unauthorized():
-    return make_response(jsonify({"status": "fail", 'message': 'Unauthorized access'}), 403)
-
-
-@app.route('/')
-def api_root():
-    return 'Kypo api\npožádejte o vytvoření uživatelského účtu'
-
-
-@app.route('/deletions', methods=['GET'])
-def api_deletions():
-    tdata.DB_CON = open_db2()
-    tdata.isadmin = True
-    everything = ""
-    vmdel = "onevm delete {0} \n"
-    vnetdel = "onevnet delete {0} \n"
-
-    try:
-        for i in get_nodes_db().itervalues():
-            everything += vmdel.format(i["internal_id"])
-
-        for i in get_networks_db().itervalues():
-            everything += vnetdel.format(i["nebulaid"])
-    except Exception as e:
-        debug_log_print("Error:", repr(e))
-
-    return everything
-
-
-@app.route('/api/v1.0/tags', methods=['GET'])
-@auth.login_required
-def api_tags_list():
-    status = "success"
-    answ = {"data": {}}
-
-    try:
-        data = get_tags()
-        answ["data"]["tags"] = data
-    except BaseException as e:
-        status = "error"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-
-    answ["status"] = status
-
-    return make_response(jsonify(answ))
-
-
-@app.route('/api/v1.0/tags', methods=['POST'])
-@auth.login_required
-def api_tags_add():
-    status = "success"
-    answ = {"data": {}}
-    added = []
-
-    try:
-        reqdata = json.loads(request.data)
-        tags = reqdata["tags"]
-        if isinstance(tags, basestring):
-            create_tag(tags)
-            added.append(tags)
-        else:
-            for t in tags:
-                try:
-                    create_tag(t)
-                    added.append(t)
-                except DuplicateNameException:
-                    pass
-    except GeneralAPIError as e:
-        status = "fail"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-    except Exception as e:
-        status = "error"
-        answ["message"] = repr(e)
-
-    answ["data"]["tags"] = added
-    answ["status"] = status
-
-    return make_response(jsonify(answ))
-
-
-@app.route('/api/v1.0/nebulaimages', methods=['GET'])
-@auth.login_required
-def api_images_list():
-    status = "success"
-    answ = {"data": {}}
-
-    try:
-        data = list_nebula_images()
-        answ["data"]["images"] = data
-    except Exception as e:
-        status = "error"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-
-    answ["status"] = status
-
-    return make_response(jsonify(answ))
-
-
-@app.route('/api/v1.0/templates', methods=['GET'])
-@auth.login_required
-def api_templates_list():
-    status = "success"
-    answ = {"data": {}}
-
-    try:
-        data = get_templates_db(request.args.get("user", None), extractdefaults=False)
-        answ["data"]["templates"] = data
-    except GeneralAPIError as e:
-        status = "fail"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-    except BaseException as e:
-        status = "error"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-
-    answ["status"] = status
-
-    return make_response(jsonify(answ))
-
-
-@app.route('/api/v1.0/templates', methods=['POST'])
-@auth.login_required
-def api_templates_add():
-    status = "success"
-    answ = {"data": {}}
-
-    try:
-        debug_log_print_ext("attempting to add template from request:", request.data)
-        reqdata = json.loads(request.data)
-        templstring = reqdata.pop("template")
-        name = reqdata.pop("name")
-        dbid = add_nodetemplate_db(templstring, name, **reqdata)
-        data = {"name": name, "id": dbid}
-        answ["data"]["template"] = data
-    except GeneralAPIError as e:
-        status = "fail"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-    except Exception as e:
-        status = "error"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-
-    answ["status"] = status
-
-    return make_response(jsonify(answ))
-
-
-@app.route('/api/v1.0/templates/<selector>',\
-           methods=['GET'])
-@auth.login_required
-def api_template_get(selector):
-    status = "success"
-    answ = {"data": {}}
-
-    templid = None
-    templname = None
-    try:
-        templid = int(selector)
-    except ValueError:
-        templname = selector
-
-    try:
-        data = get_nodetemplate_db(templid=templid, templname=templname, extractdefaults=False)
-        answ["data"]["template"] = data
-    except GeneralAPIError as e:
-        status = "fail"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-    except BaseException as e:
-        status = "error"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-
-    answ["status"] = status
-
-    return make_response(jsonify(answ))
-
-
-@app.route('/api/v1.0/nodes', methods=['GET'])
-@auth.login_required
-def api_nodes_list():
-    status = "success"
-    answ = {"data": {}}
-
-    try:
-        data = get_nodes_db_for_output()
-        answ["data"]["nodes"] = data.values()
-    except BaseException as e:
-        status = "error"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-
-    answ["status"] = status
-
-    return make_response(jsonify(answ))
-
-
-@app.route('/api/v1.0/nodes/<int:nodeid>', methods=['GET'])
-@auth.login_required
-def api_node_get(nodeid):
-    status = "success"
-    answ = {"data": {}}
-    try:
-        data = get_node_db_for_output(nodeid)
-        answ["data"]["node"] = data
-    except PrivilegeException as e:
-        status = "fail"
-        debug_log_print(e)
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + " you are neither owner nor admin of this node"
-    except NoSuchObjectException as e:
-        status = "fail"
-        debug_log_print(e)
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + " no such node id exists"
-    except BaseException as e:
-        status = "error"
-        debug_log_print(e)
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-
-    answ["status"] = status
-
-    return make_response(jsonify(answ))
-
-
-@app.route('/api/v1.0/nodes/<int:nodeid>/status', methods=['GET'])
-@auth.login_required
-def api_node_get_status(nodeid):
-    status = "success"
-    answ = {"data": {}}
-    try:
-        data = get_node_state(nodeid)
-        answ["data"] = data
-    except PrivilegeException as e:
-        status = "fail"
-        debug_log_print(e)
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + "you are neither owner nor admin of this node"
-    except NoSuchObjectException as e:
-        status = "fail"
-        debug_log_print(e)
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + "no such node id exists"
-    except BaseException as e:
-        status = "error"
-        debug_log_print(e)
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-
-    answ["status"] = status
-
-    return make_response(jsonify(answ))
-
-
-@app.route('/api/v1.0/nodes/<int:nodeid>/vncinfo', methods=['GET'])
-@auth.login_required
-def api_node_get_vncinfo(nodeid):
-    status = "success"
-    answ = {"data": {}}
-    try:
-        nodeinfo = get_node_db_for_output(nodeid)
-        if nodeinfo["state"] == "UNKNOWN":
-            raise NoSuchObjectException("underlying nebula node probably doesn't exist ")
-        if get_node_state(nodeid, selector="lcm_state") != "RUNNING":
-            raise WrongStateForActionException("that node isn't running")
-        internal = info_node_nebula(nodeinfo["internal_id"])
-        info = {"host": internal["HISTORY_RECORDS"]["HISTORY"]["HOSTNAME"],
-                "port": internal["TEMPLATE"]["GRAPHICS"]["PORT"],
-                "password": internal["TEMPLATE"]["GRAPHICS"]["PASSWD"]}
-
-        answ["data"]["vncinfo"] = info
-    except PrivilegeException as e:
-        status = "fail"
-        debug_log_print(e)
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + "you are neither owner nor admin of this node"
-    except NoSuchObjectException as e:
-        status = "fail"
-        debug_log_print(e)
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + "no such node id exists"
-    except BaseException as e:
-        status = "error"
-        debug_log_print(e)
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-
-    answ["status"] = status
-
-    return make_response(jsonify(answ))
-
-
-@app.route('/api/v1.0/nodes/<int:nodeid>', methods=['DELETE'])
-@auth.login_required
-def api_node_delete(nodeid):
-    status = "success"
-    answ = {"data": {}}
-    # debug_log_print(request.data)
-
-    try:
-        delete_node(nodeid)
-        answ["data"]["deleted"] = True
-    except GeneralAPIError as e:
-        status = "fail"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-    except Exception as e:
-        status = "error"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-
-    answ["status"] = status
-
-    return make_response(jsonify(answ))
-
-
-@app.route('/api/v1.0/nodes', methods=['POST'])
-@auth.login_required
-def api_node_create():
-    status = "success"
-    answ = {"data": {}}
-    debug_log_print("Create node",request.data)
-
-    try:
-        reqdata = json.loads(request.data)
-        templname = reqdata.pop("templatename")
-        dbid = create_node(templname, **reqdata)
-        answ["data"]["node"] = get_node_db_for_output(dbid)
-    except GeneralAPIError as e:
-        status = "fail"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-    except Exception as e:
-        status = "error"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-
-    answ["status"] = status
-
-    return make_response(jsonify(answ))
-
-
-@app.route('/api/v1.0/nets', methods=['GET'])
-@auth.login_required
-def api_nets_list():
-    status = "success"
-    answ = {"data": {}}
-
-    try:
-        data = get_networks_db_for_output()
-        answ["data"]["nets"] = data.values()
-    except BaseException as e:
-        status = "error"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-
-    answ["status"] = status
-
-    return make_response(jsonify(answ))
-
-
-@app.route('/api/v1.0/nets/<int:netid>', methods=['DELETE'])
-@auth.login_required
-def api_net_delete(netid):
-    status = "success"
-    answ = {"data": {}}
-    try:
-        remove_network(netid)
-        answ["data"]["deleted"] = netid
-    except GeneralAPIError as e:
-        status = "fail"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-    except Exception as e:
-        status = "error"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-
-    answ["status"] = status
-
-    return make_response(jsonify(answ))
-
-
-@app.route('/api/v1.0/nets', methods=['POST'])
-@auth.login_required
-def api_net_create_link():
-    status = "success"
-    answ = {"data": {}}
-    # debug_log_print(request.data)
-
-    try:
-        debug_log_print_ext("attmpting to load from json", request.data)
-        reqdata = json.loads(request.data)
-
-        n1 = reqdata.pop("node1")
-        n2 = reqdata.pop("node2")
-
-        data = connect_nodes_nebula(n1, n2, **reqdata)
-
-        answ["data"]["connection"] = data
-    except GeneralAPIError as e:
-        status = "fail"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-    except Exception as e:
-        status = "error"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-
-    answ["status"] = status
-
-    return make_response(jsonify(answ))
-
-
-@app.route('/api/v1.0/nets/<int:netid>', methods=['GET'])
-@auth.login_required
-def api_net_get(netid):
-    status = "success"
-    answ = {"data": {}}
-    try:
-        data = get_network_db_for_output(netid)
-        answ["data"]["net"] = data
-    except PrivilegeException as e:
-        status = "fail"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + " you are neither owner nor admin"
-    except NoSuchObjectException as e:
-        status = "fail"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + "no such net id exists"
-    except BaseException as e:
-        status = "error"
-        debug_log_print(e)
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-
-    answ["status"] = status
-
-    return make_response(jsonify(answ))
-
-
-@app.route('/api/v1.0/nets/<int:netid>/interfaces', methods=['GET'])
-@auth.login_required
-def api_net_interfaces_get(netid):
-    status = "success"
-    answ = {"data": {}}
-    try:
-        check_user_privilege_net(netid)
-        data = get_interfaces_db(netid=netid)
-        answ["data"]["interfaces"] = data.values()
-    except PrivilegeException as e:
-        status = "fail"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + " you are neither owner nor admin"
-    except NoSuchObjectException as e:
-        status = "fail"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + "no such net id exists"
-    except BaseException as e:
-        status = "error"
-        debug_log_print(e)
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-
-    answ["status"] = status
-
-    return make_response(jsonify(answ))
-
-
-@app.route('/api/v1.0/nodes/<int:nodeid>/interfaces', methods=['GET'])
-@auth.login_required
-def api_node_interfaces_get(nodeid):
-    status = "success"
-    answ = {"data": {}}
-    try:
-        check_user_privilege_node(nodeid)
-
-        data = get_interfaces_db(nodeid=nodeid)
-        answ["data"]["interfaces"] = data.values()
-    except PrivilegeException as e:
-        status = "fail"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + " you are neither owner nor admin"
-    except NoSuchObjectException as e:
-        status = "fail"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + "no such node id exists"
-    except BaseException as e:
-        status = "error"
-        debug_log_print(e)
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-
-    answ["status"] = status
-
-    return make_response(jsonify(answ))
-
-
-@app.route('/api/v1.0/interfaces/<int:intfid>', methods=['GET'])
-@auth.login_required
-def api_interface_get(intfid):
-    status = "success"
-    answ = {"data": {}}
-    try:
-        data = get_interface_db(intfid)
-        answ["data"]["interface"] = data
-    except PrivilegeException as e:
-        status = "fail"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + " you are neither owner nor admin"
-    except NoSuchObjectException as e:
-        status = "fail"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + "no such interface id exists"
-    except BaseException as e:
-        status = "error"
-        debug_log_print(e)
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-
-    answ["status"] = status
-
-    return make_response(jsonify(answ))
-
-
-@app.route('/api/v1.0/interfaces/<int:intfid>', methods=['DELETE'])
-@auth.login_required
-def api_interface_delete(intfid):
-    status = "success"
-    answ = {"data": {}}
-    try:
-        #TODO odstranit i addr range?
-        remove_disconnect_interface(intfid)
-
-        answ["data"]["deleted"] = True
-    except PrivilegeException as e:
-        status = "fail"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + " you are neither owner nor admin"
-    except NoSuchObjectException as e:
-        status = "fail"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log + "no such interface id exists"
-    except BaseException as e:
-        status = "error"
-        debug_log_print(e)
-        answ["message"] = repr(e)
-        answ["data"]["description"] = tdata.extended_error_log
-
-    answ["status"] = status
-
-    return make_response(jsonify(answ))
 
 
 if __name__ == '__main__':
@@ -2686,15 +2149,15 @@ if __name__ == '__main__':
     with tdata.DB_CON:
 
         if len(sys.argv) >= 2 and sys.argv[1] == "server":
-
-            callbackdispatcher = CallbackDispatcher()
-            callbackdispatcher.setDaemon(daemonic=True)
-            debug_log_print("start callback dispatcher")
-            callbackdispatcher.start()
-            debug_log_print("started callback dispatcher ")
-
-            app.run('0.0.0.0', threaded=True)
-            # app.run()
+            #
+            # callbackdispatcher = CallbackDispatcher()
+            # callbackdispatcher.setDaemon(daemonic=True)
+            # debug_log_print("start callback dispatcher")
+            # callbackdispatcher.start()
+            # debug_log_print("started callback dispatcher ")
+            #
+            # app.run('0.0.0.0', threaded=True)
+            print "run cloud_api_flaskroutes instead"
 
 
         elif len(sys.argv) >= 2 and sys.argv[1] == "init":
@@ -2728,7 +2191,7 @@ CONTEXT=[DUMMY="dummy"]
                                        cpu=1,
                                        vcpu=1,
                                        memory=512,
-            )
+                                       )
 
             try:
                 get_nodetemplate_db(templname="test_vm1")
@@ -2748,13 +2211,12 @@ CONTEXT=[DUMMY="dummy"]
         else:
             res_d = get_user("tester")
             if not res_d:
-                raise PrivilegeException("first create user")
+                raise NoSuchObjectException("first create user")
 
             tdata.username = res_d["name"]
             tdata.isadmin = res_d["isadmin"]
             tdata.extended_error_log = ""
             tdata.ownertag = "owner:{0}".format(res_d["name"])
-
 
             # debug_log_print(connect_nodes_nebula(1,2,None,None))
             # debug_log_print(connect_nodes_nebula(1,2,None,None))
@@ -2774,9 +2236,9 @@ CONTEXT=[DUMMY="dummy"]
 
             # add_tag_node(["ZZZZZ"], 1)
             # add_tag_node(["LMN","user:jirka"], 2)
-            # add_tag_node(["SMN"], 1)
+            add_tag_node(["SMN"], 1)
             # add_tag_node(["LMN","user:donald"], 3)
-            # add_tag_node(["SMN"], 4)
+            add_tag_node(["SMN"], 1)
 
             # debug_log_print("Nodes DB:", get_nodes_db(tags=["SMN"]))
             #
@@ -2807,7 +2269,7 @@ CONTEXT=[DUMMY="dummy"]
 
 
 
-            #debug_log_print(get_nodetemplate_db(1))
+            # debug_log_print(get_nodetemplate_db(1))
             #
             # ni = int(info_node_nebula(407)["STA1TE"])
             # # for key in  ni.keys():
@@ -2823,6 +2285,6 @@ CONTEXT=[DUMMY="dummy"]
 
 
             # tdata.DB_CON.close()
-            #pprint.pprint(list_templates_nebula())
+            # pprint.pprint(list_templates_nebula())
 
     time.sleep(2)
