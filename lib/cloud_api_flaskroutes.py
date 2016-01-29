@@ -24,7 +24,7 @@ def not_found(error):
 def verify_password(username, password):
     cloud_api_main.tdata.DB_CON = cloud_api_main.open_db2()
     with cloud_api_main.tdata.DB_CON:
-        res_d = cloud_api_main.get_user(username)
+        res_d = cloud_api_main.get_user(username, verifybypass=True)
         if not res_d:
             return False
 

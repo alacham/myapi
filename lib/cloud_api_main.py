@@ -459,16 +459,16 @@ class NotifyTask(object):
                 except Exception as e:
                     debug_log_print("NotifyTask: get internal id error: " + e)
 
+        while True:
+            self.taskid = random.randint(0, 2 ** 32 - 1)
+            if not self.taskid in self.active_hooks.keys():
+                self.active_hooks[self.taskid] = self
+                break
+
         if (not self.nebulaidstocheck and not self.openstackidstocheck) or (
                     not notifycondition and not notifyaddr) or not self.change_selector:
             self.finished = True
-            debug_log("NotifyTask wouldn't check any nodes")
         else:
-            while True:
-                self.taskid = random.randint(0, 2 ** 32 - 1)
-                if not self.taskid in self.active_hooks.keys():
-                    self.active_hooks[self.taskid] = self
-                    break
             if self.nebulaidstocheck:
                 self.previous_nebula = {}
 
@@ -573,7 +573,10 @@ class NotifyTask(object):
         return res
 
     def destructor(self):
-        del self.active_hooks[self.taskid]
+        try:
+            del self.active_hooks[self.taskid]
+        except (AttributeError, KeyError):
+            pass
         self.finished = True
 
 
@@ -1262,7 +1265,7 @@ def add_tag_network(tags, net):
 
 
 def add_user(username, password, isadmin=False, nebulauser=None):
-    if not tdata.isadmin:
+    if not isadmin and not tdata.isadmin:
         add_to_user_problem_msg("only admin user can add users")
         raise PrivilegeException("only admin user can add users")
 
@@ -1289,8 +1292,8 @@ def add_user(username, password, isadmin=False, nebulauser=None):
     return True
 
 
-def get_user(username):
-    if username != tdata.username and tdata.isadmin == False:
+def get_user(username, verifybypass=False):
+    if not verifybypass and username != tdata.username and tdata.isadmin == False:
         add_to_user_problem_msg("only admin user or user himself can do this")
         raise PrivilegeException("access denied")
 
@@ -1609,7 +1612,7 @@ def create_link(mac1, mac2=None):
     return netid
 
 
-def create_flat_nebulanet(size=254, startmac=None, startip=None, vxlan=False, netaddr=None, netmask=None, gateway=None):
+def create_flat_nebulanet(size=253, startmac=None, startip=None, vxlan=False, netaddr=None, netmask=None, gateway=None):
     subst_dict = {}
 
     vxid = None
@@ -2292,10 +2295,14 @@ if __name__ == '__main__':
 
 
         elif len(sys.argv) >= 2 and sys.argv[1] == "init":
-            res_d = get_user("tester")
-            if not res_d:
+
+            try:
+                res_d = get_user("tester", verifybypass=True)
+            except NoSuchObjectException:
                 add_user("tester", "tester", isadmin=True)
-            res_d = get_user("tester")
+                res_d = get_user("tester", verifybypass=True)
+
+            res_d = get_user("tester", verifybypass=True)
 
             tdata.username = res_d["name"]
             tdata.isadmin = res_d["isadmin"]
@@ -2338,9 +2345,7 @@ CONTEXT=[DUMMY="dummy"]
             debug_log_print(connect_nodes_nebula(nodeid1, nodeid2, None, None))
             debug_log_print(connect_nodes_nebula(nodeid2, nodeid1, None, None))
         else:
-            res_d = get_user("tester")
-            if not res_d:
-                raise NoSuchObjectException("first create user")
+            res_d = get_user("tester", verifybypass=True)
 
             tdata.username = res_d["name"]
             tdata.isadmin = res_d["isadmin"]
