@@ -285,6 +285,8 @@ class CallbackChecker(threading.Thread):
 
                     if not callback.finished:
                         newcallbacks.append(callback)
+                    else:
+                        callback.destructor()
 
                 callbacks_to_check = newcallbacks
 
@@ -419,7 +421,8 @@ class NotifyTask(object):
     active_hooks = {}
 
     def __init__(self, node_ids=None, change_selector=None, towhat=None, howmany=0, howlong=0, notifycondition=None,
-                 notifyaddr=None):
+                 notifyaddr=None, userhook=False):
+        self.user = tdata.username
         self.inittime = datetime.utcnow()
         self.finished = False
         self.towhat = towhat
@@ -436,15 +439,21 @@ class NotifyTask(object):
         self.nebulaid_2_dbid = {}
         self.ostackid_2_dbid = {}
         if node_ids:
-            allnodes = get_nodes_db()
             for nid in node_ids:
-                if nid not in allnodes:
-                    debug_log_print("notifytask: Entered Id doesn't belong to any id")
-                    continue
+
                 try:
-                    if allnodes[nid]["platform"] == "nebula" and allnodes[nid]["internal_id"]:
-                        self.nebulaidstocheck.add(allnodes[nid]["internal_id"])
-                        self.nebulaid_2_dbid[allnodes[nid]["internal_id"]] = nid
+                    nodeinfo = get_node_db(nid)
+                except NoSuchObjectException:
+                    debug_log_print("notifytask: Entered Id doesn't belong to any id")
+                    add_to_user_problem_msg("Entered node id doesn't return any match")
+                    if userhook:
+                        raise
+                    continue
+
+                try:
+                    if nodeinfo["platform"] == "nebula" and nodeinfo["internal_id"]:
+                        self.nebulaidstocheck.add(nodeinfo["internal_id"])
+                        self.nebulaid_2_dbid[nodeinfo["internal_id"]] = nid
                     else:  # TODO OpenStack
                         pass
                 except Exception as e:
@@ -539,6 +548,35 @@ class NotifyTask(object):
     def check_changes(self, nebuladict=None, openstackdict=None):
         return self.check_nebulanodes_changes(nebuladict) or self.check_openstacknodes_changes(openstackdict)
 
+    @classmethod
+    def get_all_hooks(cls):
+        return [ h.as_repr_dict() for h in cls.active_hooks ]
+
+
+    def as_repr_dict(self):
+        res = {}
+
+        res["username"] = self.username
+        res["starttime"] = self.inittime
+        res["isfinished"] = self.finished
+        res["goalstate"] = self.towhat
+        res["selector"] = self.change_selector
+
+        res["node_ids"] = self.nebulaid_2_dbid.values() + self.ostackid_2_dbid.values()
+        if self.howlong:
+            res["endtime"] = str(totimestamp(self.inittime) + self.howlong)
+        else:
+            res["endtime"] = None
+        res["notify_address"] = self.notifyaddr
+        res["id"] = self.taskid
+
+        return res
+
+    def destructor(self):
+        del self.active_hooks[self.taskid]
+        self.finished = True
+
+
 
 # def check_condition(test_callable, test_args, check_result_function, check_args, reaction, max_attempt_time, once=False):
 #
@@ -622,21 +660,43 @@ def run_cmd_e(cmd):
         raise ExternalCMDError("Error executing '{0}': \nSTDOUT: {1}\nSTDERR: {2}".format(cmd, stdout, stderr))
     return stdout, stderr
 
+def run_cmd_with_ret(cmd):
+    """
+
+    :param cmd:
+    :type cmd:
+    :return:
+    :rtype:
+    """
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+    stdout, stderr = process.communicate()
+
+    return process.returncode, stdout, stderr
 
 # vulnerability, replace with paramiko module
 def run_ssh_on_node(nodeid, cmd):
     check_user_privilege_node(nodeid)
 
-    base_ssh_cmd = "ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -A root@{0}"
+    base_ssh_cmd = "ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -A root@{0} {1}"
 
     ip_addrs = filter(None, map(lambda a: a["ip_addr"], get_accessible_intf(nodeid)))
+
+    #TODO: zkusim proste prvni - jake jine moznosti reseni?
+
+    cmd_to_exec = base_ssh_cmd.format(ip_addrs[0], base_ssh_cmd)
+
+    result = {}
+    result["exit_status"], result["stdout"], result["stderr"] = run_cmd_with_ret(cmd_to_exec)
+
+    return result
+
 
 
 def get_accessible_intf(nodeid):
     db_con = tdata.DB_CON
     with db_con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as db_cur:
         db_cur.execute("SELECT intf.* from interfaces intf, networks net WHERE \
-          net.type='plain-flat' AND net.id=intf.net_id AND intf.node_id=%s ;", (nodeid,))
+          net.type='plain-flat' AND net.id=intf.net_id AND intf.node_id=%s  AND (net.vid IS NULL OR net.vid=0) ;", (nodeid,))
         ip_addrs = db_cur.fetchone()
     return ip_addrs
 
@@ -1029,6 +1089,21 @@ def add_interface_db(info_d, netid):
             raise GeneralAPIError(e + str(intf_tuple))
     return dbid
 
+def update_interface_db(intfid, intf_d):
+# TODO TEST
+    original_d = get_interface_db(intfid)
+
+    db_con = tdata.DB_CON
+    with db_con.cursor() as db_cur:
+
+        intf_props = [intf_d.get("node_id", original_d["node_id"]), intf_d.get("mac_addr", original_d["mac_addr"]),
+                      intf_d.get("ip_addr", original_d["ip_addr"]), intf_d.get("net_id", original_d["net_id"]),
+                      intf_d.get("shaping", original_d["shaping"])]
+
+        db_cur.execute("UPDATE interfaces SET node_id=%s, mac_addr=%s, ip_addr=%s, net_id=%s, shaping=%s  WHERE id=%s ;",
+                       intf_props + [intfid])
+
+
 
 def delete_node_db(nodeid):
     db_con = tdata.DB_CON
@@ -1187,6 +1262,11 @@ def add_tag_network(tags, net):
 
 
 def add_user(username, password, isadmin=False, nebulauser=None):
+    if not tdata.isadmin:
+        add_to_user_problem_msg("only admin user can add users")
+        raise PrivilegeException("only admin user can add users")
+
+
     saltstr = "".join(random.choice(SALTCHARS) for _ in range(SALTLEN))
     # derivedkey = hashlib.pbkdf2_hmac('sha256', password, saltstr, 100000)
     # hexalified = binascii.hexlify(derivedkey)
@@ -1210,11 +1290,62 @@ def add_user(username, password, isadmin=False, nebulauser=None):
 
 
 def get_user(username):
+    if username != tdata.username and tdata.isadmin == False:
+        add_to_user_problem_msg("only admin user or user himself can do this")
+        raise PrivilegeException("access denied")
+
     db_con = tdata.DB_CON
     with db_con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as db_cur:
         db_cur.execute("SELECT * FROM users WHERE name=%s ;", [username])
         res_d = db_cur.fetchone()
+
+    if not res_d:
+        add_to_user_problem_msg("user '{0}' not in database".format(username))
+        raise NoSuchObjectException("user of such name doesn't exist")
+
     return res_d
+
+
+#TODO TEST
+def get_users():
+    db_con = tdata.DB_CON
+    with db_con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as db_cur:
+        db_cur.execute("SELECT id, name, isadmin, nebulauser FROM users ;")
+        results = db_cur.fetchall()
+
+    res_d = {}
+    for user in results:
+        res_d[user["name"]] = user
+
+    return res_d
+
+#TODO TEST
+def change_user(username, user_d):
+    if username != tdata.username and tdata.isadmin == False:
+        add_to_user_problem_msg("only admin user or user himself can do this")
+        raise PrivilegeException("access denied")
+
+    if user_d["isadmin"] and not tdata.isadmin:
+        add_to_user_problem_msg("only admin can add user privileges")
+        raise PrivilegeException("access denied")
+
+    original_d = get_user(username)
+
+    new_d = {}
+    for k in original_d.keys():
+        new_d[k] = user_d.get(k, original_d[k])
+
+    if "password" in user_d:
+        hexalified = hashlib.sha512(user_d["password"] + new_d["salt"]).hexdigest()
+        new_d["password"] = hexalified
+
+    updatetuple = [new_d["password"], new_d["salt"], new_d["isadmin"],new_d["nebulauser"],username]
+    db_con = tdata.DB_CON
+    with db_con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as db_cur:
+        db_cur.execute("UPDATE users SET password=%s, salt=%s, isadmin=%s, nebulauser=%s WHERE name=%s ;", updatetuple)
+
+    changed = get_user(username)
+    return changed
 
 
 def get_tags():
@@ -1731,15 +1862,14 @@ def change_node_state_cruder(nodeid, desiredstate, waitforit=True):
                 raise GeneralAPIError("change to state {0} not possible from state {1}, lcm_state: \
                  {2}".format(desiredstate, states_d["vm_state"], states_d["lcm_state"]))
         else:
-            debug_log_print(
+            add_to_user_problem_msg(
                     "in vm state: {0:s} , lcm state {1:s} is not possible to change state".format(states_d["vm_state"],
                                                                                                   states_d[
                                                                                                       "lcm_state"]))
-            raise GeneralAPIError(
+            raise WrongStateForActionException(
                     "in vm state: {0:s} , lcm state {1:s} is not possible to change state".format(states_d["vm_state"],
                                                                                                   states_d[
                                                                                                       "lcm_state"]))
-
 
     else:  # OpenStack
         pass
@@ -2064,7 +2194,8 @@ def get_node_state_nebula(nebulaid):
     vm_state = ni["STATE"]
     lcm_state = ni["LCM_STATE"]
     value = {"vm_state": NUM2VMSTATE[vm_state], "lcm_state": NUM2LCMSTATE[lcm_state],
-             "STATE": NUM2VMSTATE[vm_state], "LCM_STATE": NUM2LCMSTATE[lcm_state]}
+             "STATE": NUM2VMSTATE[vm_state], "LCM_STATE": NUM2LCMSTATE[lcm_state],
+             "state": NUM2VMSTATE[vm_state]}
 
     return value
 
@@ -2168,10 +2299,8 @@ if __name__ == '__main__':
 
             tdata.username = res_d["name"]
             tdata.isadmin = res_d["isadmin"]
-            tdata.extended_error_log = ""
             tdata.ownertag = "owner:{0}".format(res_d["name"])
 
-            tdata.extended_error_log = ""
 
             nodetmpl = '''CPU=$cpu
 VCPU=$vcpu
@@ -2215,7 +2344,6 @@ CONTEXT=[DUMMY="dummy"]
 
             tdata.username = res_d["name"]
             tdata.isadmin = res_d["isadmin"]
-            tdata.extended_error_log = ""
             tdata.ownertag = "owner:{0}".format(res_d["name"])
 
             # debug_log_print(connect_nodes_nebula(1,2,None,None))

@@ -31,7 +31,7 @@ def verify_password(username, password):
         cloud_api_main.tdata.username = username
         cloud_api_main.tdata.isadmin = res_d["isadmin"]
         cloud_api_main.tdata.userid = res_d["id"]
-        cloud_api_main.tdata.extended_error_log = ""
+        cloud_api_main.tdata.extended_error_log = []
         cloud_api_main.tdata.ownertag = "owner:{0}".format(username)
 
         # derivedkey = hashlib.pbkdf2_hmac('sha256', password, res_d["salt"], 100000)
@@ -195,8 +195,7 @@ def api_templates_add():
     return make_response(jsonify(answ))
 
 
-@app.route('/api/v1.0/templates/<selector>', \
-           methods=['GET'])
+@app.route('/api/v1.0/templates/<selector>', methods=['GET'])
 @auth.login_required
 def api_template_get(selector):
     status = "success"
@@ -292,7 +291,7 @@ def api_node_get_status(nodeid):
         status = "error"
         cloud_api_main.debug_log_print(e)
         answ["message"] = repr(e)
-        answ["data"]["description"] = cloud_api_main.tdata.extended_error_log
+        answ["data"]["description"] = cloud_api_main.get_user_problem_msg()
 
     answ["status"] = status
 
@@ -304,23 +303,25 @@ def api_node_set_status(nodeid):
     status = "success"
     answ = {"data": {}}
     try:
-        data = cloud_api_main.get_node_state(nodeid)
+        cloud_api_main.check_user_privilege_node(nodeid)
+        reqdata = json.loads(request.data)
+
+        wantedstate = reqdata.get("status")
+        if not wantedstate:
+            cloud_api_main.add_to_user_problem_msg("no status to change to")
+            raise cloud_api_main.WrongRequestException("wrong request")
+
+        data = cloud_api_main.change_node_state_cruder(nodeid,wantedstate)
         answ["data"] = data
-    except cloud_api_main.PrivilegeException as e:
+    except (cloud_api_main.PrivilegeException, cloud_api_main.NoSuchObjectException, cloud_api_main.WrongRequestException) as e:
         status = "fail"
-        cloud_api_main.debug_log_print(e)
         answ["message"] = repr(e)
-        answ["data"]["description"] = cloud_api_main.tdata.extended_error_log + "you are neither owner nor admin of this node"
-    except cloud_api_main.NoSuchObjectException as e:
-        status = "fail"
-        cloud_api_main.debug_log_print(e)
-        answ["message"] = repr(e)
-        answ["data"]["description"] = cloud_api_main.tdata.extended_error_log + "no such node id exists"
+        answ["data"]["description"] = cloud_api_main.get_user_problem_msg()
     except BaseException as e:
         status = "error"
         cloud_api_main.debug_log_print(e)
         answ["message"] = repr(e)
-        answ["data"]["description"] = cloud_api_main.tdata.extended_error_log
+        answ["data"]["description"] = cloud_api_main.get_user_problem_msg()
 
     answ["status"] = status
 
@@ -345,25 +346,52 @@ def api_node_get_vncinfo(nodeid):
                 "password": internal["TEMPLATE"]["GRAPHICS"]["PASSWD"]}
 
         answ["data"]["vncinfo"] = info
-    except cloud_api_main.PrivilegeException as e:
+    except (cloud_api_main.PrivilegeException, cloud_api_main.NoSuchObjectException) as e:
         status = "fail"
-        cloud_api_main.debug_log_print(e)
         answ["message"] = repr(e)
-        answ["data"]["description"] = cloud_api_main.tdata.extended_error_log + "you are neither owner nor admin of this node"
-    except cloud_api_main.NoSuchObjectException as e:
+        answ["data"]["description"] = cloud_api_main.get_user_problem_msg()
+    except cloud_api_main.GeneralAPIError as e:
         status = "fail"
-        cloud_api_main.debug_log_print(e)
         answ["message"] = repr(e)
-        answ["data"]["description"] = cloud_api_main.tdata.extended_error_log + "no such node id exists"
-    except BaseException as e:
+        answ["data"]["description"] =  cloud_api_main.get_user_problem_msg()
+    except Exception as e:
         status = "error"
-        cloud_api_main.debug_log_print(e)
         answ["message"] = repr(e)
-        answ["data"]["description"] = cloud_api_main.tdata.extended_error_log
+        answ["data"]["description"] = cloud_api_main.get_user_problem_msg()
 
     answ["status"] = status
 
     return make_response(jsonify(answ))
+
+
+@app.route('/api/v1.0/nodes/<int:nodeid>', methods=['POST'])
+@auth.login_required
+def api_node_sshcmd(nodeid):
+    status = "success"
+    answ = {"data": {}}
+    cloud_api_main.debug_log_print("Create node", request.data)
+
+    try:
+        reqdata = json.loads(request.data)
+        cmd = reqdata.get("cmd")
+
+        result = cloud_api_main.run_ssh_on_node(nodeid, cmd)
+
+        answ["data"]["result"] = result
+
+    except cloud_api_main.GeneralAPIError as e:
+        status = "fail"
+        answ["message"] = repr(e)
+        answ["data"]["description"] =  cloud_api_main.get_user_problem_msg()
+    except Exception as e:
+        status = "error"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = cloud_api_main.get_user_problem_msg()
+
+    answ["status"] = status
+
+    return make_response(jsonify(answ))
+
 
 
 @app.route('/api/v1.0/nodes/<int:nodeid>', methods=['DELETE'])
@@ -376,14 +404,15 @@ def api_node_delete(nodeid):
     try:
         cloud_api_main.delete_node(nodeid)
         answ["data"]["deleted"] = True
+
     except cloud_api_main.GeneralAPIError as e:
         status = "fail"
         answ["message"] = repr(e)
-        answ["data"]["description"] = cloud_api_main.tdata.extended_error_log
+        answ["data"]["description"] =  cloud_api_main.get_user_problem_msg()
     except Exception as e:
         status = "error"
         answ["message"] = repr(e)
-        answ["data"]["description"] = cloud_api_main.tdata.extended_error_log
+        answ["data"]["description"] = cloud_api_main.get_user_problem_msg()
 
     answ["status"] = status
 
@@ -405,11 +434,11 @@ def api_node_create():
     except cloud_api_main.GeneralAPIError as e:
         status = "fail"
         answ["message"] = repr(e)
-        answ["data"]["description"] = cloud_api_main.tdata.extended_error_log
+        answ["data"]["description"] =  cloud_api_main.get_user_problem_msg()
     except Exception as e:
         status = "error"
         answ["message"] = repr(e)
-        answ["data"]["description"] = cloud_api_main.tdata.extended_error_log
+        answ["data"]["description"] = cloud_api_main.get_user_problem_msg()
 
     answ["status"] = status
 
@@ -425,10 +454,14 @@ def api_nets_list():
     try:
         data = cloud_api_main.get_networks_db_for_output()
         answ["data"]["nets"] = data.values()
-    except BaseException as e:
+    except cloud_api_main.GeneralAPIError as e:
+        status = "fail"
+        answ["message"] = repr(e)
+        answ["data"]["description"] =  cloud_api_main.get_user_problem_msg()
+    except Exception as e:
         status = "error"
         answ["message"] = repr(e)
-        answ["data"]["description"] = cloud_api_main.tdata.extended_error_log
+        answ["data"]["description"] = cloud_api_main.get_user_problem_msg()
 
     answ["status"] = status
 
@@ -443,14 +476,19 @@ def api_net_delete(netid):
     try:
         cloud_api_main.remove_network(netid)
         answ["data"]["deleted"] = netid
+    except (cloud_api_main.PrivilegeException, cloud_api_main.NoSuchObjectException) as e:
+        status = "fail"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = cloud_api_main.get_user_problem_msg()
+
     except cloud_api_main.GeneralAPIError as e:
         status = "fail"
         answ["message"] = repr(e)
-        answ["data"]["description"] = cloud_api_main.tdata.extended_error_log
+        answ["data"]["description"] =  cloud_api_main.get_user_problem_msg()
     except Exception as e:
         status = "error"
         answ["message"] = repr(e)
-        answ["data"]["description"] = cloud_api_main.tdata.extended_error_log
+        answ["data"]["description"] = cloud_api_main.get_user_problem_msg()
 
     answ["status"] = status
 
@@ -474,14 +512,19 @@ def api_net_create_link():
         data = cloud_api_main.connect_nodes_nebula(n1, n2, **reqdata)
 
         answ["data"]["connection"] = data
+    except (cloud_api_main.PrivilegeException, cloud_api_main.NoSuchObjectException) as e:
+        status = "fail"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = cloud_api_main.get_user_problem_msg()
+
     except cloud_api_main.GeneralAPIError as e:
         status = "fail"
         answ["message"] = repr(e)
-        answ["data"]["description"] = cloud_api_main.tdata.extended_error_log
+        answ["data"]["description"] =  cloud_api_main.get_user_problem_msg()
     except Exception as e:
         status = "error"
         answ["message"] = repr(e)
-        answ["data"]["description"] = cloud_api_main.tdata.extended_error_log
+        answ["data"]["description"] = cloud_api_main.get_user_problem_msg()
 
     answ["status"] = status
 
@@ -496,14 +539,10 @@ def api_net_get(netid):
     try:
         data = cloud_api_main.get_network_db_for_output(netid)
         answ["data"]["net"] = data
-    except cloud_api_main.PrivilegeException as e:
+    except (cloud_api_main.PrivilegeException, cloud_api_main.NoSuchObjectException) as e:
         status = "fail"
         answ["message"] = repr(e)
-        answ["data"]["description"] = cloud_api_main.tdata.extended_error_log + " you are neither owner nor admin"
-    except cloud_api_main.NoSuchObjectException as e:
-        status = "fail"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = cloud_api_main.tdata.extended_error_log + "no such net id exists"
+        answ["data"]["description"] = cloud_api_main.get_user_problem_msg()
     except BaseException as e:
         status = "error"
         cloud_api_main.debug_log_print(e)
@@ -524,14 +563,10 @@ def api_net_interfaces_get(netid):
         cloud_api_main.check_user_privilege_net(netid)
         data = cloud_api_main.get_interfaces_db(netid=netid)
         answ["data"]["interfaces"] = data.values()
-    except cloud_api_main.PrivilegeException as e:
+    except (cloud_api_main.PrivilegeException, cloud_api_main.NoSuchObjectException) as e:
         status = "fail"
         answ["message"] = repr(e)
-        answ["data"]["description"] = cloud_api_main.tdata.extended_error_log + " you are neither owner nor admin"
-    except cloud_api_main.NoSuchObjectException as e:
-        status = "fail"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = cloud_api_main.tdata.extended_error_log + "no such net id exists"
+        answ["data"]["description"] = cloud_api_main.get_user_problem_msg()
     except BaseException as e:
         status = "error"
         cloud_api_main.debug_log_print(e)
@@ -553,14 +588,10 @@ def api_node_interfaces_get(nodeid):
 
         data = cloud_api_main.get_interfaces_db(nodeid=nodeid)
         answ["data"]["interfaces"] = data.values()
-    except cloud_api_main.PrivilegeException as e:
+    except (cloud_api_main.PrivilegeException, cloud_api_main.NoSuchObjectException) as e:
         status = "fail"
         answ["message"] = repr(e)
-        answ["data"]["description"] = cloud_api_main.tdata.extended_error_log + " you are neither owner nor admin"
-    except cloud_api_main.NoSuchObjectException as e:
-        status = "fail"
-        answ["message"] = repr(e)
-        answ["data"]["description"] = cloud_api_main.tdata.extended_error_log + "no such node id exists"
+        answ["data"]["description"] = cloud_api_main.get_user_problem_msg()
     except BaseException as e:
         status = "error"
         cloud_api_main.debug_log_print(e)
@@ -660,9 +691,10 @@ def api_node_tags_add(nodeid):
 def api_node_tags_change(nodeid):
     status = "success"
     answ = {"data": {}}
-    cloud_api_main.debug_log_print("Change tags", request.data)
 
     try:
+        cloud_api_main.debug_log_print("Change tags", request.data)
+
         cloud_api_main.check_user_privilege_node(nodeid)
 
         reqdata = json.loads(request.data)
@@ -737,6 +769,196 @@ def api_node_tags_delete(nodeid,tag):
 
     return make_response(jsonify(answ))
 
+
+
+@app.route('/api/v1.0/users', methods=['GET'])
+@auth.login_required
+def api_users_list():
+    status = "success"
+    answ = {"data": {}}
+
+    try:
+        data = cloud_api_main.get_users()
+        answ["data"]["nodes"] = data.values()
+    except BaseException as e:
+        status = "error"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = cloud_api_main.tdata.extended_error_log
+
+    answ["status"] = status
+
+    return make_response(jsonify(answ))
+
+
+@app.route('/api/v1.0/users', methods=['POST'])
+@auth.login_required
+def api_user_add():
+    status = "success"
+    answ = {"data": {}}
+
+    try:
+
+        reqdata = json.loads(request.data)
+
+        try:
+            username = reqdata.pop("name")
+            password = reqdata.pop("password")
+            isadmin = reqdata.get("isadmin", False)
+            nebulauser = reqdata.get("nebulauser", None)
+        except KeyError:
+            raise cloud_api_main.WrongRequestException("name or password parameters missing")
+
+        cloud_api_main.add_user(username,password,isadmin,nebulauser)
+
+        data = cloud_api_main.get_user(username)
+        answ["data"]["user"] = data.values()
+
+    except (cloud_api_main.PrivilegeException, cloud_api_main.NoSuchObjectException, cloud_api_main.WrongRequestException) as e:
+        status = "fail"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = cloud_api_main.get_user_problem_msg()
+
+    except Exception as e:
+        status = "error"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = cloud_api_main.get_user_problem_msg()
+
+
+    answ["status"] = status
+
+    return make_response(jsonify(answ))
+
+
+@app.route('/api/v1.0/users/<username>', methods=['GET'])
+@auth.login_required
+def api_user_get(username):
+    status = "success"
+    answ = {"data": {}}
+
+    try:
+        data = cloud_api_main.get_user(username)
+        answ["data"]["user"] = data
+
+    except (cloud_api_main.PrivilegeException, cloud_api_main.NoSuchObjectException, cloud_api_main.WrongRequestException) as e:
+        status = "fail"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = cloud_api_main.get_user_problem_msg()
+
+
+    except BaseException as e:
+        status = "error"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = cloud_api_main.tdata.extended_error_log
+
+    answ["status"] = status
+
+    return make_response(jsonify(answ))
+
+
+
+@app.route('/api/v1.0/users/<username>', methods=['PUT'])
+@auth.login_required
+def api_user_change(username):
+    status = "success"
+    answ = {"data": {}}
+
+    try:
+        reqdata = json.loads(request.data)
+
+        try:
+            user_d = reqdata["user"]
+        except KeyError:
+            raise cloud_api_main.WrongRequestException("dictionary defining new user properties missing")
+
+        cloud_api_main.change_user(username, user_d)
+
+
+        data = cloud_api_main.get_user(username)
+        answ["data"]["user"] = data
+
+    except (cloud_api_main.PrivilegeException, cloud_api_main.NoSuchObjectException, cloud_api_main.WrongRequestException) as e:
+        status = "fail"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = cloud_api_main.get_user_problem_msg()
+
+
+    except BaseException as e:
+        status = "error"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = cloud_api_main.tdata.extended_error_log
+
+    answ["status"] = status
+
+    return make_response(jsonify(answ))
+
+
+
+@app.route('/api/v1.0/callbacks', methods=['GET'])
+@auth.login_required
+def api_hooks_list():
+    status = "success"
+    answ = {"data": {}}
+
+    try:
+        data = cloud_api_main.NotifyTask.get_all_hooks()
+        answ["data"]["callbacks"] = data.values()
+
+    except (cloud_api_main.PrivilegeException, cloud_api_main.NoSuchObjectException, cloud_api_main.WrongRequestException) as e:
+        status = "fail"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = cloud_api_main.get_user_problem_msg()
+
+    except Exception as e:
+        status = "error"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = cloud_api_main.get_user_problem_msg()
+
+
+    answ["status"] = status
+
+    return make_response(jsonify(answ))
+
+@app.route('/api/v1.0/callbacks', methods=['POST'])
+@auth.login_required
+def api_hook_create():
+    status = "success"
+    answ = {"data": {}}
+
+    try:
+        reqdata = json.loads(request.data)
+
+        try:
+            selector = reqdata["selector"]
+            towhat = reqdata.get("goalstate", None)
+            ids = reqdata["node_ids"]
+            howlong = reqdata.get("howlong", None)
+            notifyaddr = reqdata["notify_address"]
+            howmany = reqdata.get("howmany")
+
+        except KeyError:
+            raise cloud_api_main.WrongRequestException("dictionary defining new callback incomplete")
+
+        hook = cloud_api_main.NotifyTask(ids,selector,towhat,howmany,howlong,notifyaddr=notifyaddr)
+        taskid = hook.taskid
+
+        answ["data"]["callback"] = hook.as_repr_dict()
+
+
+
+    except (cloud_api_main.PrivilegeException, cloud_api_main.NoSuchObjectException, cloud_api_main.WrongRequestException) as e:
+        status = "fail"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = cloud_api_main.get_user_problem_msg()
+
+    except Exception as e:
+        status = "error"
+        answ["message"] = repr(e)
+        answ["data"]["description"] = cloud_api_main.get_user_problem_msg()
+
+
+    answ["status"] = status
+
+    return make_response(jsonify(answ))
 
 
 
