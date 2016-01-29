@@ -48,7 +48,6 @@ def unauthorized():
 
 @app.route('/')
 def api_root():
-    print request.args.get("asdf")
     return 'Kypo api\npožádejte o vytvoření uživatelského účtu'
 
 
@@ -506,12 +505,18 @@ def api_net_create_link():
         cloud_api_main.debug_log_print_ext("attmpting to load from json", request.data)
         reqdata = cloud_api_main.json.loads(request.data)
 
-        n1 = reqdata.pop("node1")
-        n2 = reqdata.pop("node2")
+        netid = None
+        if "node1" in reqdata and "node2" in reqdata:
+            n1 = reqdata.pop("node1")
+            n2 = reqdata.pop("node2")
 
-        data = cloud_api_main.connect_nodes_nebula(n1, n2, **reqdata)
+            data = cloud_api_main.connect_nodes_nebula(n1, n2, **reqdata)
+            answ["data"]["connection"] = data
+            netid = data["id"]
+        else:
+            pass
 
-        answ["data"]["connection"] = data
+        answ["data"]["net"] = cloud_api_main.get_network_db_for_output()
     except (cloud_api_main.PrivilegeException, cloud_api_main.NoSuchObjectException) as e:
         status = "fail"
         answ["message"] = repr(e)

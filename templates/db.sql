@@ -18,6 +18,7 @@ CREATE TABLE networks (
   vid   	bigint UNIQUE,
   type  	varchar(255), 
   reservedsince timestamp DEFAULT now(),
+  accessible	bool DEFAULT FALSE,
   PRIMARY KEY (id));
 
 

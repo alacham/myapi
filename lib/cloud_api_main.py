@@ -114,6 +114,12 @@ def add_to_user_problem_msg(*msgs):
 def get_user_problem_msg():
     return "\n".join(tdata.user_info)
 
+def mask_to_slashed(maskstr):
+
+    return sum(map(lambda a: bin(a).count("1"), maskstr.split(".")))
+
+
+
 
 callback_send_queue = Queue.Queue()
 
@@ -421,7 +427,7 @@ class NotifyTask(object):
     active_hooks = {}
 
     def __init__(self, node_ids=None, change_selector=None, towhat=None, howmany=0, howlong=0, notifycondition=None,
-                 notifyaddr=None, userhook=False):
+                 notifyaddr=None, userhook=False, nebulaidstocheck=None):
         self.user = tdata.username
         self.inittime = datetime.utcnow()
         self.finished = False
@@ -433,7 +439,11 @@ class NotifyTask(object):
         self.notifycondition = notifycondition
         self.notifyaddr = notifyaddr
 
-        self.nebulaidstocheck = set()
+        if nebulaidstocheck:
+            self.nebulaidstocheck = set(nebulaidstocheck)
+        else:
+            self.nebulaidstocheck = set()
+
         self.openstackidstocheck = set()
 
         self.nebulaid_2_dbid = {}
@@ -1143,6 +1153,12 @@ def decrease_net_size_db(netid, howmuch=1):
         db_cur.execute("UPDATE networks SET size=size-%s WHERE id=%s ;", (howmuch, netid))
 
 
+def set_net_accessibility(netid, isaccessible=False):
+    db_con = tdata.DB_CON
+    with db_con.cursor() as db_cur:
+        db_cur.execute("UPDATE networks SET accessible=%s WHERE id=%s ;", (isaccessible, netid))
+
+
 def add_network_db(net_d, type="pt2pt", size=2):
     db_con = tdata.DB_CON
     net_tuple = [net_d["nebulaid"], size, net_d["vxid"], type, datetime.utcnow()]
@@ -1612,7 +1628,8 @@ def create_link(mac1, mac2=None):
     return netid
 
 
-def create_flat_nebulanet(size=253, startmac=None, startip=None, vxlan=False, netaddr=None, netmask=None, gateway=None):
+def create_flat_nebulanet(size=253, startmac=None, startip=None, vxlan=False, netaddr=None, netmask=None, gateway=None,
+                          serverip=None):
     subst_dict = {}
 
     vxid = None
@@ -1682,6 +1699,27 @@ def create_flat_nebulanet(size=253, startmac=None, startip=None, vxlan=False, ne
     net_d = {"nebulaid": nebulanetid, "vxid": vxid}
 
     netid = add_network_db(net_d, type, size=size)
+
+    if serverip:
+        #TODO error check
+        slashmask = mask_to_slashed(netmask)
+        if type == "plain-flat":
+            run_cmd("sudo ip a add {0}/{1} dev {2}".format(serverip, slashmask, BASENETINTERFACE))
+            set_net_accessibility(netid, isaccessible=True)
+
+        elif type == "vxlan-flat":
+            vxintfname = "vx-{0}".format(vxid)
+
+            #startgroupaddr = "239.0.0.0"
+            groupnum = 239 * 256**3 + vxid
+            binstr = bin(groupnum)[2:] #string zacina "0b..."
+            groupaddr = "{0}.{1}.{2}.{3}".format(int(binstr[0:8],2),int(binstr[8:16],2),int(binstr[16:24],2),int(binstr[24:32],2))
+
+            run_cmd("sudo ip l add {0} type vxlan id {1} group {2} dev {3}".format(vxintfname, vxid, groupaddr, BASENETINTERFACE))
+            for h_ip in HOSTS:
+                run_cmd("sudo bridge fdb append 00:00:00:00:00:00 dev {0} dst {1}".format(vxintfname,h_ip))
+            set_net_accessibility(netid, isaccessible=True)
+
 
     return netid
 
@@ -1880,7 +1918,7 @@ def change_node_state_cruder(nodeid, desiredstate, waitforit=True):
     return True
 
 
-def connect_nodes_nebula(n1, n2, mac1=None, mac2=None):
+def connect_nodes_nebula(n1, n2, mac1=None, mac2=None, tags=None, **kwargs):
     if not mac1:
         mac1 = str(MacAddress.from_parts(macprefix=MAC_PREFIX_DEFAULT))
     if not mac2:
@@ -1914,6 +1952,7 @@ def connect_nodes_nebula(n1, n2, mac1=None, mac2=None):
         intfid2 = attach_node_to_net(node2_d, netid)
     except BaseException as e:
         debug_log_print_ext(e)
+        add_to_user_problem_msg(e)
         try:
             remove_disconnect_interface(intfid1, deleteaddrarr=False)
         except:
@@ -1924,6 +1963,16 @@ def connect_nodes_nebula(n1, n2, mac1=None, mac2=None):
             pass
         run_cmd("onevnet delete {0}".format(net_d["nebulaid"]))
         raise
+
+    # add tags to network
+    for t in tags:
+        try:
+            create_tag(t)
+        except DuplicateNameException:
+            pass
+        else:
+            add_to_user_problem_msg("tag: {0} didnt exist, was created".format(t))
+        add_tag_network(t, netid)
 
     return {"id": netid, "interface_id1": intfid1, "interface_id2": intfid2}
 
@@ -2339,7 +2388,34 @@ CONTEXT=[DUMMY="dummy"]
             nodeid2 = create_node("test_vm1")
             debug_log_print("node created:", nodeid2)
 
-            time.sleep(60)
+            change_condition = threading.Condition()
+            with change_condition:
+                cb = NotifyTask(node_ids=[nodeid1], change_selector="LCM_STATE",
+                                towhat=LCM_STATE.index("RUNNING"), howmany=0,
+                                notifycondition=change_condition)
+                callbacks_in_queue.put(cb)
+                while True:
+                    print get_node_state(nodeid2)["LCM_STATE"]
+                    if get_node_state(nodeid1)["LCM_STATE"] == "RUNNING":
+                        break
+                    else:
+                        change_condition.wait()
+            debug_log_print("prvni callback done")
+
+            change_condition = threading.Condition()
+            with change_condition:
+                cb = NotifyTask(node_ids=[nodeid2], change_selector="LCM_STATE",
+                                towhat=LCM_STATE.index("RUNNING"), howmany=0,
+                                notifycondition=change_condition)
+                callbacks_in_queue.put(cb)
+                while True:
+                    print get_node_state(nodeid2)["LCM_STATE"]
+                    if get_node_state(nodeid2)["LCM_STATE"] == "RUNNING":
+                        break
+                    else:
+                        change_condition.wait()
+            debug_log_print("druhy callback done")
+
 
             debug_log_print(connect_nodes_nebula(nodeid1, nodeid2, None, None))
             debug_log_print(connect_nodes_nebula(nodeid1, nodeid2, None, None))
@@ -2351,13 +2427,16 @@ CONTEXT=[DUMMY="dummy"]
             tdata.isadmin = res_d["isadmin"]
             tdata.ownertag = "owner:{0}".format(res_d["name"])
 
+
+
+
             # debug_log_print(connect_nodes_nebula(1,2,None,None))
             # debug_log_print(connect_nodes_nebula(1,2,None,None))
 
-            debug_print(get_nodes_db_for_output())
-            debug_print(get_node_db_for_output(1))
-            debug_print(get_network_db_for_output(1))
-            debug_print(get_networks_db_for_output())
+            # debug_print(get_nodes_db_for_output())
+            # debug_print(get_node_db_for_output(1))
+            # debug_print(get_network_db_for_output(1))
+            # debug_print(get_networks_db_for_output())
 
             # debug_print(get_interfaces_db(nodeid=2))
             #
@@ -2369,9 +2448,9 @@ CONTEXT=[DUMMY="dummy"]
 
             # add_tag_node(["ZZZZZ"], 1)
             # add_tag_node(["LMN","user:jirka"], 2)
-            add_tag_node(["SMN"], 1)
+            # add_tag_node(["SMN"], 1)
             # add_tag_node(["LMN","user:donald"], 3)
-            add_tag_node(["SMN"], 1)
+            # add_tag_node(["SMN"], 1)
 
             # debug_log_print("Nodes DB:", get_nodes_db(tags=["SMN"]))
             #
