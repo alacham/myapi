@@ -115,8 +115,14 @@ def get_user_problem_msg():
     return "\n".join(tdata.user_info)
 
 def mask_to_slashed(maskstr):
+    try:
+        ones_in_octets = map(lambda a: bin(int(a)).count("1"), maskstr.split("."))
+    except ValueError:
+        add_to_user_problem_msg("wrong netmask entered: {0}".format(maskstr))
+        raise WrongRequestException("wrong netmask")
 
-    return sum(map(lambda a: bin(a).count("1"), maskstr.split(".")))
+
+    return sum(ones_in_octets)
 
 
 
@@ -690,16 +696,22 @@ def run_cmd_with_ret(cmd):
 def run_ssh_on_node(nodeid, cmd):
     check_user_privilege_node(nodeid)
 
-    base_ssh_cmd = "ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -A root@{0} {1}"
+    base_ssh_cmd = "ssh -x -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -A root@{0} {1}"
 
     ip_addrs = filter(None, map(lambda a: a["ip_addr"], get_accessible_intf(nodeid)))
 
-    #TODO: zkusim proste prvni - jake jine moznosti reseni?
+    if not ip_addrs:
+        add_to_user_problem_msg("this node isn't accessible - to be accessible it has to be connected to flat network")
+        add_to_user_problem_msg("and have right IP addr in DB interface")
+        raise WrongRequestException("no accessible interface on node")
 
-    cmd_to_exec = base_ssh_cmd.format(ip_addrs[0], base_ssh_cmd)
+    cmd_to_exec = base_ssh_cmd.format(ip_addrs[0], cmd)
+
+    debug_log_print("cmd to execute", cmd_to_exec)
 
     result = {}
     result["exit_status"], result["stdout"], result["stderr"] = run_cmd_with_ret(cmd_to_exec)
+    result["called_cmd"] = cmd_to_exec
 
     return result
 
@@ -709,8 +721,8 @@ def get_accessible_intf(nodeid):
     db_con = tdata.DB_CON
     with db_con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as db_cur:
         db_cur.execute("SELECT intf.* from interfaces intf, networks net WHERE \
-          net.type='plain-flat' AND net.id=intf.net_id AND intf.node_id=%s  AND (net.vid IS NULL OR net.vid=0) ;", (nodeid,))
-        ip_addrs = db_cur.fetchone()
+          net.id=intf.net_id AND intf.node_id=%s  AND net.accessible ;", (nodeid,))
+        ip_addrs = db_cur.fetchall()
     return ip_addrs
 
 
@@ -834,11 +846,12 @@ def get_nodes_db(tags=None, nodeids=None):
                     db_cur.execute(querystart + nodeids_placeholder + queryend, nodeids)
             else:
                 if not tdata.isadmin:
-                    query = "SELECT n.* from nodes n, node_taggings nt, tagwords t WHERE t.tag=%s AND nt.tag_id = t.id AND n.id = nt.node_id ;"
+                    query = "SELECT n.* from nodes n, node_taggings nt, tagwords t \
+                    WHERE t.tag=%s AND nt.tag_id = t.id AND n.id = nt.node_id ;"
                     db_cur.execute(query, (tdata.ownertag,))
 
                 else:
-                    db_cur.execute("SELECT * from nodes ;")
+                    db_cur.execute("SELECT * from nodes WHERE platform<>'apiserver';")
 
         nodes = db_cur.fetchall()
 
@@ -1075,7 +1088,8 @@ def add_node_db(node_d):
             node_d.get("name", None), node_d.get("internal_id", None), datetime.utcnow(),
             node_d["platform"], node_d.get("creationtemplate"))
         db_cur.execute(
-                "INSERT into nodes (name, internal_id, lastchange, platform, creationtemplate) VALUES ( %s, %s, %s, %s, %s) RETURNING id;",
+                "INSERT into nodes (name, internal_id, lastchange, platform, creationtemplate) \
+                VALUES ( %s, %s, %s, %s, %s) RETURNING id;",
                 node_tuple)
         try:
             nodeid = db_cur.fetchone()[0]
@@ -1090,11 +1104,12 @@ def add_interface_db(info_d, netid):
     # info_d  je node_d ale s pridanymi parametry
     db_con = tdata.DB_CON
     with db_con.cursor() as db_cur:
-        intf_tuple = (info_d["id"], info_d.get("mac_addr"), info_d.get("ip", None), netid, info_d.get("shaping", ""))
+        intf_tuple = (info_d["id"], info_d.get("mac_addr"), info_d.get("ip_addr", None), netid, info_d.get("shaping", ""))
         isok = True
         try:
             db_cur.execute(
-                    "INSERT into interfaces (node_id, mac_addr, ip_addr, net_id, shaping) VALUES (%s, %s, %s, %s, %s) RETURNING id;",
+                    "INSERT into interfaces (node_id, mac_addr, ip_addr, net_id, shaping) \
+                    VALUES (%s, %s, %s, %s, %s) RETURNING id;",
                     intf_tuple)
             dbid = db_cur.fetchone()[0]
         except psycopg2.IntegrityError as e:
@@ -1171,7 +1186,8 @@ def add_network_db(net_d, type="pt2pt", size=2):
                 "INSERT into networks (nebulaid,size,vid,type,reservedsince) VALUES (%s, %s, %s, %s, %s) RETURNING id;",
                 net_tuple)
         # else:
-        #     db_cur.execute("INSERT into networks (nebulaid,size,used,vid,type,shaping,reservedsince) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id;" ,net_tuple)
+        #     db_cur.execute("INSERT into networks (nebulaid,size,used,vid,type,shaping,reservedsince)\
+        #  VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id;" ,net_tuple)
         netid = db_cur.fetchone()[0]
 
     add_tag_network(tdata.ownertag, netid)
@@ -1188,7 +1204,8 @@ def add_nodetemplate_db(templstring, name, defaultvalues=None, defaultuse=False,
     with db_con.cursor() as db_cur:
         try:
             db_cur.execute(
-                    "INSERT into templates (name,template,defaultvalues,defaultuse,userid,platform) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id;",
+                    "INSERT into templates (name,template,defaultvalues,defaultuse,userid,platform)\
+                     VALUES (%s, %s, %s, %s, %s, %s) RETURNING id;",
                     (name, templstring, defaultvalues, defaultuse, userid, platform))
             dbid = db_cur.fetchone()[0]
         except psycopg2.IntegrityError  as e:
@@ -1624,7 +1641,6 @@ def create_link(mac1, mac2=None):
     netid = add_network_db(net_d, "pt2pt", size=netsize)
 
     debug_log_print('Nebula net {0} added as network with db id {1} '.format(nebulanetid, netid))
-    time.sleep(3)
     return netid
 
 
@@ -1716,6 +1732,8 @@ def create_flat_nebulanet(size=253, startmac=None, startip=None, vxlan=False, ne
             groupaddr = "{0}.{1}.{2}.{3}".format(int(binstr[0:8],2),int(binstr[8:16],2),int(binstr[16:24],2),int(binstr[24:32],2))
 
             run_cmd("sudo ip l add {0} type vxlan id {1} group {2} dev {3}".format(vxintfname, vxid, groupaddr, BASENETINTERFACE))
+            run_cmd("sudo ip a add {0}/{1} dev {2}".format(serverip, slashmask, vxintfname))
+            run_cmd("sudo ip l set up {0}".format(vxintfname))
             for h_ip in HOSTS:
                 run_cmd("sudo bridge fdb append 00:00:00:00:00:00 dev {0} dst {1}".format(vxintfname,h_ip))
             set_net_accessibility(netid, isaccessible=True)
@@ -1986,8 +2004,18 @@ def create_node(templatename, **kwargs):
         pass
 
 
-def create_node_nebula(templateid, nics=None, tags=None, **kwargs):
-    # TODO nics
+def create_node_nebula(templateid, attached_nets=None, tags=None, **kwargs):
+    niclines = []
+    reverse_nebulanet_dbnet = {}
+    if attached_nets:
+        for netid in attached_nets:
+            try:
+                net_d = get_network_db(netid)
+            except NoSuchObjectException:
+                add_to_user_problem_msg("you can't attach node to network, that you don't have access to: {0}".format(netid))
+                raise
+            niclines.append(NICLINE.format(net_d["nebulaid"])+"\n")
+            reverse_nebulanet_dbnet[net_d["nebulaid"]] = netid
 
     ownertag = tdata.ownertag
     if not tags:
@@ -2008,6 +2036,7 @@ def create_node_nebula(templateid, nics=None, tags=None, **kwargs):
 
     # add to db
     db_id = add_node_db(node_d)
+    node_d["id"] = db_id
 
     # add tags
     for tag in tags:
@@ -2019,6 +2048,8 @@ def create_node_nebula(templateid, nics=None, tags=None, **kwargs):
 
     temp_templ_f = tempfile.NamedTemporaryFile(delete=False)
     temp_templ_f.write(vmtempl.safe_substitute(templ_d["defaultvalues"]))
+    if niclines:
+        temp_templ_f.writelines(niclines)
     # debug_log_print(vmtempl.safe_substitute(templ_d["defaultvalues"]))
     temp_templ_f.flush()
     temp_templ_f.close()
@@ -2072,6 +2103,17 @@ def create_node_nebula(templateid, nics=None, tags=None, **kwargs):
     node_d["internal_id"] = internalid
 
     update_node_db(db_id, node_d)
+
+    nics = nebulainfo["TEMPLATE"].get("NIC")
+    if nics:
+        for nic in nics:
+            #TODO NICS ADD
+            node_d["mac_addr"] = nic.get("MAC")
+            node_d["ip_addr"] = nic.get("IP")
+
+            nid = reverse_nebulanet_dbnet[nic.get("NETWORK_ID")]
+
+            add_interface_db(node_d, nid)
 
     debug_log_print("Node created:", get_node_db_and_internal(db_id))
 
@@ -2351,6 +2393,10 @@ if __name__ == '__main__':
                 add_user("tester", "tester", isadmin=True)
                 res_d = get_user("tester", verifybypass=True)
 
+            add_node_db({"name":"API_SERVER", "platform": "apiserver"})
+
+
+
             res_d = get_user("tester", verifybypass=True)
 
             tdata.username = res_d["name"]
@@ -2358,24 +2404,30 @@ if __name__ == '__main__':
             tdata.ownertag = "owner:{0}".format(res_d["name"])
 
 
-            nodetmpl = '''CPU=$cpu
-VCPU=$vcpu
-MEMORY=$memory
-DISK=[DEV_PREFIX=vd, IMAGE_ID=$image_id]
-INPUT = [TYPE=tablet, BUS=usb]
-GRAPHICS=[KEYMAP=en-us, LISTEN=0.0.0.0, TYPE=vnc, PASSWD="$vnc_passwd"]
-OS=[ARCH=x86_64, BOOT=hd]
-SCHED_REQUIREMENTS="(CLUSTER=\\"kypo-sitola\\")"
-RAW=[DATA="<!-- RAW data follows: --><cpu mode='host-model'></cpu>",TYPE="kvm"]
-CONTEXT=[DUMMY="dummy"]
+            nodetmpl = '''CONTEXT=[NETWORK="YES",PUBLIC_IP="$NIC[IP]",SSH_KEY="$USER[SSH_KEY]",\
+SSH_PUBLIC_KEY="$USER[SSH_PUBLIC_KEY]",TARGET="vdb",USER_DATA="dummy",$usercontext]
+CPU="$cpu"
+VCPU="$vcpu"
+DISK=[DEV_PREFIX="vd",IMAGE_ID="$image_id"]
+FEATURES=[ACPI="yes",PAE="yes"]
+GRAPHICS=[LISTEN="0.0.0.0",PASSWD="$vnc_passwd",TYPE="VNC"]
+SCHED_REQUIREMENTS="(CLUSTER=\\"$cluster\\")"
+HYPERVISOR="kvm"
+MEMORY="$memory"
+OS=[ARCH="x86_64",BOOT="hd"]
+RAW=[DATA="undefined",DATA_VMX="undefined"]
+SUNSTONE_CAPACITY_SELECT="YES"
+SUNSTONE_NETWORK_SELECT="YES"
+VCPU="1"
 '''
 
-            default_node_values = dict(image_id=61,
+            default_node_values = dict(image_id=64,
                                        vnc_passwd="d3f4u1t_vNc.p4s5W0rD!",
                                        cluster=CLUSTER_NAME,
                                        cpu=1,
                                        vcpu=1,
-                                       memory=512,
+                                       memory=256,
+                                       usercontext='VAR="SOME_VALUE"'
                                        )
 
             try:
@@ -2383,43 +2435,43 @@ CONTEXT=[DUMMY="dummy"]
             except NoSuchObjectException:
                 add_nodetemplate_db(nodetmpl, "test_vm1", defaultvalues=json.dumps(default_node_values))
 
-            nodeid1 = create_node("test_vm1")
-            debug_log_print("node created:", nodeid1)
-            nodeid2 = create_node("test_vm1")
-            debug_log_print("node created:", nodeid2)
-
-            change_condition = threading.Condition()
-            with change_condition:
-                cb = NotifyTask(node_ids=[nodeid1], change_selector="LCM_STATE",
-                                towhat=LCM_STATE.index("RUNNING"), howmany=0,
-                                notifycondition=change_condition)
-                callbacks_in_queue.put(cb)
-                while True:
-                    print get_node_state(nodeid2)["LCM_STATE"]
-                    if get_node_state(nodeid1)["LCM_STATE"] == "RUNNING":
-                        break
-                    else:
-                        change_condition.wait()
-            debug_log_print("prvni callback done")
-
-            change_condition = threading.Condition()
-            with change_condition:
-                cb = NotifyTask(node_ids=[nodeid2], change_selector="LCM_STATE",
-                                towhat=LCM_STATE.index("RUNNING"), howmany=0,
-                                notifycondition=change_condition)
-                callbacks_in_queue.put(cb)
-                while True:
-                    print get_node_state(nodeid2)["LCM_STATE"]
-                    if get_node_state(nodeid2)["LCM_STATE"] == "RUNNING":
-                        break
-                    else:
-                        change_condition.wait()
-            debug_log_print("druhy callback done")
-
-
-            debug_log_print(connect_nodes_nebula(nodeid1, nodeid2, None, None))
-            debug_log_print(connect_nodes_nebula(nodeid1, nodeid2, None, None))
-            debug_log_print(connect_nodes_nebula(nodeid2, nodeid1, None, None))
+            # nodeid1 = create_node("test_vm1")
+            # debug_log_print("node created:", nodeid1)
+            # nodeid2 = create_node("test_vm1")
+            # debug_log_print("node created:", nodeid2)
+            #
+            # change_condition = threading.Condition()
+            # with change_condition:
+            #     cb = NotifyTask(node_ids=[nodeid1], change_selector="LCM_STATE",
+            #                     towhat=LCM_STATE.index("RUNNING"), howmany=0,
+            #                     notifycondition=change_condition)
+            #     callbacks_in_queue.put(cb)
+            #     while True:
+            #         print get_node_state(nodeid2)["LCM_STATE"]
+            #         if get_node_state(nodeid1)["LCM_STATE"] == "RUNNING":
+            #             break
+            #         else:
+            #             change_condition.wait()
+            # debug_log_print("prvni callback done")
+            #
+            # change_condition = threading.Condition()
+            # with change_condition:
+            #     cb = NotifyTask(node_ids=[nodeid2], change_selector="LCM_STATE",
+            #                     towhat=LCM_STATE.index("RUNNING"), howmany=0,
+            #                     notifycondition=change_condition)
+            #     callbacks_in_queue.put(cb)
+            #     while True:
+            #         print get_node_state(nodeid2)["LCM_STATE"]
+            #         if get_node_state(nodeid2)["LCM_STATE"] == "RUNNING":
+            #             break
+            #         else:
+            #             change_condition.wait()
+            # debug_log_print("druhy callback done")
+            #
+            #
+            # debug_log_print(connect_nodes_nebula(nodeid1, nodeid2, None, None))
+            # debug_log_print(connect_nodes_nebula(nodeid1, nodeid2, None, None))
+            # debug_log_print(connect_nodes_nebula(nodeid2, nodeid1, None, None))
         else:
             res_d = get_user("tester", verifybypass=True)
 
@@ -2428,6 +2480,15 @@ CONTEXT=[DUMMY="dummy"]
             tdata.ownertag = "owner:{0}".format(res_d["name"])
 
 
+            # debug_print("Flat sit:", create_flat_nebulanet(size=250, startmac=None, startip="192.168.214.1", vxlan=True, netaddr="192.168.214.0", netmask="255.255.255.0", gateway=None,
+            #               serverip="192.168.214.254"))
+            #
+            # nodeid1 = create_node("test_vm1", attached_nets=[4], name="ffsdffffhhhsdfh", image_id="64")
+            # debug_log_print("node created:", nodeid1)
+            # #
+            # time.sleep(60)
+            print "command"
+            print run_ssh_on_node(13, "ls")
 
 
             # debug_log_print(connect_nodes_nebula(1,2,None,None))

@@ -22,16 +22,22 @@ def not_found(error):
 
 @auth.verify_password
 def verify_password(username, password):
+    cloud_api_main.tdata.extended_error_log = []
+    cloud_api_main.tdata.user_info = []
+
     cloud_api_main.tdata.DB_CON = cloud_api_main.open_db2()
     with cloud_api_main.tdata.DB_CON:
-        res_d = cloud_api_main.get_user(username, verifybypass=True)
+        try:
+            res_d = cloud_api_main.get_user(username, verifybypass=True)
+        except cloud_api_main.NoSuchObjectException as e:
+            res_d = None
+
         if not res_d:
             return False
 
         cloud_api_main.tdata.username = username
         cloud_api_main.tdata.isadmin = res_d["isadmin"]
         cloud_api_main.tdata.userid = res_d["id"]
-        cloud_api_main.tdata.extended_error_log = []
         cloud_api_main.tdata.ownertag = "owner:{0}".format(username)
 
         # derivedkey = hashlib.pbkdf2_hmac('sha256', password, res_d["salt"], 100000)
@@ -43,7 +49,8 @@ def verify_password(username, password):
 
 @auth.error_handler
 def unauthorized():
-    return make_response(jsonify({"status": "fail", 'message': 'Unauthorized access'}), 403)
+    return make_response(jsonify({"status": "fail", 'message': 'Unauthorized access',
+                                  "description": cloud_api_main.get_user_problem_msg()}), 403)
 
 
 @app.route('/')
@@ -61,7 +68,8 @@ def api_deletions():
 
     try:
         for i in cloud_api_main.get_nodes_db().itervalues():
-            everything += vmdel.format(i["internal_id"])
+            if i["platform"] == "nebula" and i["internal_id"]:
+                everything += vmdel.format(i["internal_id"])
 
         for i in cloud_api_main.get_networks_db().itervalues():
             everything += vnetdel.format(i["nebulaid"])
@@ -513,6 +521,12 @@ def api_net_create_link():
             data = cloud_api_main.connect_nodes_nebula(n1, n2, **reqdata)
             answ["data"]["connection"] = data
             netid = data["id"]
+        elif "mac1" in reqdata and "mac2" in reqdata:
+            mac1 = reqdata.pop("mac1")
+            mac2 = reqdata.pop("mac1")
+
+            netid = cloud_api_main.create_link(mac1, mac2)
+
         else:
             pass
 
